@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS deal_master (
     cusip               TEXT    NOT NULL UNIQUE,
     notional_amount     REAL    NOT NULL,
     spread              REAL    NOT NULL DEFAULT 0,
+    accrual_day_basis   TEXT    NOT NULL DEFAULT 'Calendar Days'
+                            CHECK(accrual_day_basis IN ('Calendar Days','Observation Period Days')),
     rate_type           TEXT    NOT NULL CHECK(rate_type IN ('SOFR','SOFR Index')),
     payment_frequency   TEXT    NOT NULL CHECK(payment_frequency IN ('Monthly','Quarterly')),
     observation_shift   TEXT    NOT NULL DEFAULT 'N' CHECK(observation_shift IN ('Y','N')),
@@ -231,6 +233,13 @@ def init_db():
             conn.execute("ALTER TABLE deal_master ADD COLUMN spread REAL NOT NULL DEFAULT 0")
         except Exception:
             pass
+        try:
+            conn.execute(
+                "ALTER TABLE deal_master ADD COLUMN accrual_day_basis "
+                "TEXT NOT NULL DEFAULT 'Calendar Days'"
+            )
+        except Exception:
+            pass
 
         # Migration: migrate sofr_index from old combined sofr_rates table
         # (if sofr_index column exists in sofr_rates, copy data and drop column)
@@ -322,6 +331,14 @@ def _nearest_index_date(conn, d: date) -> date | None:
 
 def _accrual_days(start: date, end: date) -> int:
     return (end - start).days
+
+
+def _deal_accrual_days(deal: dict, calendar_start: date, calendar_end: date,
+                       obs_start: date, obs_end: date) -> int:
+    basis = deal.get("accrual_day_basis") or "Calendar Days"
+    if basis == "Observation Period Days":
+        return _accrual_days(obs_start, obs_end)
+    return _accrual_days(calendar_start, calendar_end)
 
 
 def _iter_business_days(start: date, end: date):
@@ -466,7 +483,7 @@ def _calc_compounded(conn, deal: dict, p_start: date, p_end: date,
 
     obs_start = _shift_date_back(eff_start, lb)
     obs_end   = _shift_date_back(eff_end,   lb)
-    accrual   = _accrual_days(eff_start, eff_end)
+    accrual   = _deal_accrual_days(deal, eff_start, eff_end, obs_start, obs_end)
 
     product    = 1.0
     daily_rows = []
@@ -500,7 +517,7 @@ def _calc_simple_average(conn, deal: dict, p_start: date, p_end: date,
     lb        = deal["look_back_days"]
     obs_start = _shift_date_back(p_start, lb)
     obs_end   = _shift_date_back(p_end,   lb)
-    accrual   = _accrual_days(p_start, p_end)
+    accrual   = _deal_accrual_days(deal, p_start, p_end, obs_start, obs_end)
 
     sum_w, sum_d = 0.0, 0
     daily_rows   = []
@@ -601,9 +618,8 @@ def _calc_index(conn, deal: dict, p_start: date, p_end: date,
         ).fetchone()
         return row["sofr_rate"] if row else None
 
-    # Accrual days = calendar days from period start to period end (inclusive)
-    # p_end is already the last day of the period (payment date excluded)
-    accrual = _accrual_days(p_start, p_end)
+    # Accrual days may be based on period dates or observation dates per deal setup.
+    accrual = _deal_accrual_days(deal, p_start, p_end, obs_start_d, obs_end_d)
 
     if accrual <= 0:
         raise ValueError(
@@ -689,6 +705,7 @@ def _calculate_interest_for_deal(conn, deal: dict, cusip: str,
         "notional_amount":     deal["notional_amount"],
         "spread":              spread_pct,
         "spread_rate":         spread_rate,
+        "accrual_day_basis":   deal.get("accrual_day_basis") or "Calendar Days",
         "rate_type":           deal["rate_type"],
         "payment_frequency":   deal["payment_frequency"],
         "calculation_method":  method,
@@ -896,7 +913,7 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
         obs_s = _nearest_next_bday(_shift_date_back(eff_ps, lb))
         obs_e = _nearest_next_bday(_shift_date_back(eff_pe, lb))
 
-        acc   = _accrual_days(eff_ps, eff_pe)
+        acc   = _deal_accrual_days(deal, eff_ps, eff_pe, obs_s, obs_e)
         unadj = pay_date   # payment date already adjusted in _gen_periods
         adj   = pay_date
 
@@ -931,6 +948,38 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
     """, rows)
 
     refresh_schedule_status(conn, cusip)
+
+
+def refresh_schedule_accruals(conn, cusip: str) -> int:
+    deal = conn.execute(
+        "SELECT * FROM deal_master WHERE cusip=?", (cusip,)
+    ).fetchone()
+    if not deal:
+        return 0
+    deal = dict(deal)
+
+    rows = conn.execute("""
+        SELECT schedule_id, period_start_date, period_end_date,
+               eff_period_start_date, eff_period_end_date,
+               obs_start_date, obs_end_date
+        FROM payment_schedule
+        WHERE cusip=?
+        ORDER BY period_number
+    """, (cusip,)).fetchall()
+
+    updated = 0
+    for row in rows:
+        eff_ps = date.fromisoformat(row["eff_period_start_date"])
+        eff_pe = date.fromisoformat(row["eff_period_end_date"])
+        obs_s = date.fromisoformat(row["obs_start_date"])
+        obs_e = date.fromisoformat(row["obs_end_date"])
+        accrual = _deal_accrual_days(deal, eff_ps, eff_pe, obs_s, obs_e)
+        conn.execute(
+            "UPDATE payment_schedule SET accrual_days=? WHERE schedule_id=?",
+            (accrual, row["schedule_id"])
+        )
+        updated += 1
+    return updated
 
 
 def generate_all_schedules(conn, rebuild: bool = True,
@@ -1135,15 +1184,16 @@ def insert_deal(conn, d: dict):
     fpd = d.get("first_payment_date") or d.get("start_date")
     conn.execute("""
         INSERT INTO deal_master(
-            deal_name, client_name, cusip, notional_amount, spread,
+            deal_name, client_name, cusip, notional_amount, spread, accrual_day_basis,
             rate_type, payment_frequency, observation_shift,
             shifted_interest, payment_delay, payment_delay_days,
             rounding_decimals, look_back_days, calculation_method,
             first_payment_date, maturity_date, status
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         d["deal_name"], d["client_name"], d["cusip"], d["notional_amount"],
         float(d.get("spread") or 0),
+        d.get("accrual_day_basis", "Calendar Days"),
         d["rate_type"], d["payment_frequency"], d["observation_shift"],
         d["shifted_interest"], d["payment_delay"],
         int(d.get("payment_delay_days") or 0),
@@ -1156,12 +1206,16 @@ def update_deal(conn, cusip: str, d: dict):
     d = enforce_frequency(d)
     fpd = d.get("first_payment_date") or d.get("start_date")
     existing = conn.execute(
-        "SELECT spread FROM deal_master WHERE cusip=?", (cusip,)
+        "SELECT spread, accrual_day_basis FROM deal_master WHERE cusip=?", (cusip,)
     ).fetchone()
     old_spread = float(existing["spread"] or 0) if existing else 0.0
+    old_accrual_basis = (
+        existing["accrual_day_basis"] if existing and existing["accrual_day_basis"]
+        else "Calendar Days"
+    )
     conn.execute("""
         UPDATE deal_master SET
-            deal_name=?, client_name=?, notional_amount=?, spread=?,
+            deal_name=?, client_name=?, notional_amount=?, spread=?, accrual_day_basis=?,
             rate_type=?, payment_frequency=?, observation_shift=?,
             shifted_interest=?, payment_delay=?, payment_delay_days=?,
             rounding_decimals=?, look_back_days=?, calculation_method=?,
@@ -1171,6 +1225,7 @@ def update_deal(conn, cusip: str, d: dict):
     """, (
         d["deal_name"], d["client_name"], d["notional_amount"],
         float(d.get("spread") or 0),
+        d.get("accrual_day_basis", "Calendar Days"),
         d["rate_type"], d["payment_frequency"], d["observation_shift"],
         d["shifted_interest"], d["payment_delay"],
         int(d.get("payment_delay_days") or 0),
@@ -1179,7 +1234,10 @@ def update_deal(conn, cusip: str, d: dict):
         cusip
     ))
     new_spread = float(d.get("spread") or 0)
-    if abs(new_spread - old_spread) > 1e-12:
+    new_accrual_basis = d.get("accrual_day_basis", "Calendar Days")
+    if (abs(new_spread - old_spread) > 1e-12
+            or new_accrual_basis != old_accrual_basis):
+        refresh_schedule_accruals(conn, cusip)
         return recalculate_existing_results(conn, cusip)
     return {"schedule_rows_updated": 0, "log_rows_updated": 0}
 

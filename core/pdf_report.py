@@ -216,6 +216,8 @@ def generate_calculation_pdf(result: dict,
          "Obs Shift",    result.get("observation_shift","—")],
         ["Shifted Int",  result.get("shifted_interest","—"),
          "Look Back",    f"{result.get('look_back_days','—')}d"],
+        ["Accrual Basis", result.get("accrual_day_basis","Calendar Days"),
+         "Accrual Days",  str(result.get("accrual_days","—"))],
         ["Pay Delay",    result.get("payment_delay_flag", "—"),
          "Rounding",     f"{rnd} decimals"],
     ]

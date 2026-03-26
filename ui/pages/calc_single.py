@@ -687,6 +687,12 @@ class CalcSinglePage(QWidget):
     <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Day Count</td>
     <td style='padding:10px 14px; font-weight:600;'>ACT / {res['day_count_basis']}</td>
   </tr>
+  <tr>
+    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Accrual Basis</td>
+    <td style='padding:10px 14px; font-weight:600;'>{res.get('accrual_day_basis', 'Calendar Days')}</td>
+    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Accrual Days</td>
+    <td style='padding:10px 14px; font-weight:600;'>{res['accrual_days']}</td>
+  </tr>
 </table>
 
 <div style='background:#ECFDF5; border:1px solid #A7F3D0; border-radius:8px;

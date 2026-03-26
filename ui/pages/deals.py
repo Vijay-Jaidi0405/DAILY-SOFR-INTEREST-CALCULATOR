@@ -19,6 +19,7 @@ FREQS      = ["Monthly", "Quarterly"]
 YN         = ["N", "Y"]
 ROUNDINGS  = [4, 5, 6]
 LOOKBACKS  = [2, 3, 5]
+ACCRUAL_BASES = ["Calendar Days", "Observation Period Days"]
 
 
 def _divider():
@@ -140,6 +141,7 @@ class DealDialog(QDialog):
         self.f_shifted_int = combo(YN)
         self.f_pay_delay   = combo(YN)
         self.f_lookback    = combo(LOOKBACKS)
+        self.f_accrual_basis = combo(ACCRUAL_BASES)
 
         # Payment delay days — only active when Pay Delay = Y
         self.f_delay_days = QSpinBox()
@@ -155,6 +157,7 @@ class DealDialog(QDialog):
         form3.addRow("Payment Delay",      self.f_pay_delay)
         form3.addRow("Delay Days",         self.f_delay_days)
         form3.addRow("Look Back Days",     self.f_lookback)
+        form3.addRow("Accrual Days Basis", self.f_accrual_basis)
         body_lay.addLayout(form3)
         body_lay.addSpacing(16)
         body_lay.addWidget(_divider())
@@ -388,6 +391,9 @@ class DealDialog(QDialog):
         self.f_shifted_int.setCurrentText(d["shifted_interest"])
         self.f_pay_delay.setCurrentText(d["payment_delay"])
         self.f_lookback.setCurrentText(str(d["look_back_days"]))
+        self.f_accrual_basis.setCurrentText(
+            d.get("accrual_day_basis") or "Calendar Days"
+        )
         self.f_rounding.setCurrentText(str(d["rounding_decimals"]))
         self.f_delay_days.setValue(int(d.get("payment_delay_days") or 0))
         self.f_delay_days.setEnabled(d["payment_delay"] == "Y")
@@ -451,6 +457,7 @@ class DealDialog(QDialog):
                                    if self.f_pay_delay.currentText() == "Y"
                                    else 0),
             "look_back_days":     int(self.f_lookback.currentText()),
+            "accrual_day_basis":  self.f_accrual_basis.currentText(),
             "rounding_decimals":  int(self.f_rounding.currentText()),
             "first_payment_date": self.f_first_payment.date().toString("yyyy-MM-dd"),
             "maturity_date":      self.f_maturity.date().toString("yyyy-MM-dd"),
@@ -519,6 +526,7 @@ class DealsPage(QWidget):
             "CUSIP", "Deal Name", "Client", "Notional", "Spread",
             "Rate Type", "Frequency", "Method",
             "Obs Shift", "SI", "Pay Delay", "Delay Days",
+            "Accrual Basis",
             "Lookback", "Rounding",
             "First Payment Date", "Maturity Date", "Status"
         ]
@@ -548,6 +556,7 @@ class DealsPage(QWidget):
                 d["shifted_interest"],
                 d["payment_delay"],
                 str(d.get("payment_delay_days") or 0),
+                d.get("accrual_day_basis") or "Calendar Days",
                 str(d["look_back_days"]),
                 str(d["rounding_decimals"]),
                 make_date_item(d.get("first_payment_date") or d.get("start_date")),

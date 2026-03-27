@@ -25,37 +25,8 @@ DARK   = (0.102, 0.102, 0.118)   # #1A1A1E
 GREY   = (0.420, 0.443, 0.502)   # #6B7280
 LGREY  = (0.953, 0.953, 0.969)   # #F3F4F6
 
-#PDF_DIR = Path(__file__).parent.parent / "PDF Reports"
-PDF_DIR = Path("/home/vijay/Desktop/SOFR Reports")
-SOFR_RATE_DIR = "SOFR Rate Calculations"
-SOFR_INDEX_DIR = "SOFR Index Calculations"
-
-
-def _sanitize_path_part(value, fallback: str) -> str:
-    raw = str(value or "").strip()
-    if not raw or raw == "—":
-        return fallback
-
-    cleaned = "".join(
-        "_" if ch in '<>:"/\\|?*' else ch
-        for ch in raw
-    ).strip()
-    return cleaned or fallback
-
-
-def _is_index_result(result: dict) -> bool:
-    return (
-        result.get("rate_type") == "SOFR Index"
-        or result.get("calculation_method") == "SOFR Index"
-    )
-
-
-def _resolve_report_dir(result: dict, output_dir: Optional[Path] = None) -> Path:
-    base_dir = Path(output_dir) if output_dir else PDF_DIR
-    category_dir = SOFR_INDEX_DIR if _is_index_result(result) else SOFR_RATE_DIR
-    client_name = _sanitize_path_part(result.get("client_name"), "Unknown Client")
-    cusip = _sanitize_path_part(result.get("cusip"), "UNKNOWN")
-    return base_dir / category_dir / f"{client_name} - {cusip}"
+PDF_DIR = Path(__file__).parent.parent / "PDF Reports"
+#PDF_DIR = '/home/vijay/Desktop/SOFR Reports'
 
 def _fmt_money(v) -> str:
     if v is None: return "—"
@@ -109,11 +80,12 @@ def generate_calculation_pdf(result: dict,
         )
 
     # ── Output path ──────────────────────────────────────────────────────────
-    out_dir = _resolve_report_dir(result, output_dir)
+    out_dir = output_dir or PDF_DIR
+    #out_dir = PDF_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
-    cusip  = _sanitize_path_part(result.get("cusip"), "UNKNOWN")
+    cusip  = result.get("cusip", "UNKNOWN")
     fname  = f"SOFR_Calc_{cusip}_{ts}.pdf"
     fpath  = out_dir / fname
 
@@ -432,8 +404,7 @@ def generate_batch_pdf(results: list[dict],
     except ImportError:
         raise ImportError("pip install reportlab")
 
-    sample_result = next((r for r in results if r.get("status") == "OK"), {})
-    out_dir = _resolve_report_dir(sample_result, output_dir)
+    out_dir = output_dir or PDF_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ts    = datetime.now().strftime("%Y%m%d_%H%M%S")

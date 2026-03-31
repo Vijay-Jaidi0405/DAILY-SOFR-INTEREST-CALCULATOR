@@ -92,7 +92,7 @@ class SchedulePage(QWidget):
         # Schedule table
         panel = Panel("Period Schedule")
         cols = [
-            "#", "Period Start", "Period End", "Obs Start", "Obs End",
+            "#", "Period Start", "Period End (Excl.)", "Obs Start", "Obs End (Excl.)",
             "Payment Date", "Days", "Status",
             "Comp/Avg Rate", "Annualized Rate", "Interest", "Running Total"
         ]

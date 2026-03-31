@@ -366,6 +366,11 @@ def _iter_business_days(start: date, end: date):
         d += timedelta(days=1)
 
 
+def _last_business_day_before(d: date) -> date:
+    """Return the last business day strictly before the exclusive end date."""
+    return _shift_business_days_back(d, 1)
+
+
 def _is_good_friday(d: date) -> bool:
     """
     Returns True if date d is Good Friday (Friday before Easter Sunday).
@@ -464,15 +469,16 @@ def _check_obs_rates_available(conn, obs_start: date, obs_end: date,
         r2 = _nearest_index_date(conn, obs_end)
         return r1 is not None and r2 is not None
     else:
+        last_required = _last_business_day_before(obs_end)
         # For SOFR rate deals: check sofr_rates table
         max_row = conn.execute("SELECT MAX(rate_date) AS mx FROM sofr_rates").fetchone()
         if not max_row or not max_row["mx"]:
             return False
         max_rate = date.fromisoformat(max_row["mx"])
-        if max_rate < obs_end:
+        if max_rate < last_required:
             return False
         r1 = _nearest_rate_date(conn, obs_start)
-        r2 = _nearest_rate_date(conn, obs_end)
+        r2 = _nearest_rate_date(conn, last_required)
         return r1 is not None and r2 is not None
 
 
@@ -831,11 +837,12 @@ def _gen_periods(deal_start: date, maturity: date, freq: str,
     Convention (ISDA/ARRC):
       payment_date[N] = next_bday( deal_start + N*months + delay_days )
       period_start[N] = payment_date[N-1]   (= deal_start for period 1)
-      period_end[N]   = prev_bday( payment_date[N] - 1 day )
-                        *** payment_date is EXCLUDED from the accrual period ***
+      period_end[N]   = payment_date[N]
+                        *** period_end is EXCLUSIVE from the accrual period ***
 
     All payment dates and period dates are business days.
-    The last period ends on or before maturity (also a business day).
+    The last period's exclusive end is on or before maturity
+    (also a business day).
     """
     months        = 1 if freq == "Monthly" else 3
     maturity_bday = _nearest_next_bday(maturity)
@@ -861,8 +868,8 @@ def _gen_periods(deal_start: date, maturity: date, freq: str,
         # Period start = previous payment date (deal_start for period 1)
         p_start = prev_pay
 
-        # Period end = last business day BEFORE payment date
-        p_end = _nearest_prev_bday(pay_date - timedelta(days=1))
+        # Period end is the exclusive boundary, equal to the payment date.
+        p_end = pay_date
 
         # Guard: end must be strictly after start
         if p_end <= p_start:
@@ -912,20 +919,20 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
     rows = []
     for num, ps, pe, pay_date in periods:
         # ps  = period start (= previous payment date, deal_start for period 1)
-        # pe  = period end   (= prev bday before pay_date; payment EXCLUDED)
+        # pe  = period end   (= payment date boundary; end is EXCLUSIVE)
         # pay_date = adjusted payment date for this period
 
         # Shifted-interest: effective accrual period shifted back by lookback
         if si:
-            eff_ps = _nearest_next_bday(_shift_business_days_back(ps, lb))
-            eff_pe = _nearest_next_bday(_shift_business_days_back(pe, lb))
+            eff_ps = _shift_business_days_back(ps, lb)
+            eff_pe = _shift_business_days_back(pe, lb)
         else:
             eff_ps = ps
             eff_pe = pe
 
         # Observation window = effective dates shifted back by lookback.
-        obs_s = _nearest_next_bday(_shift_business_days_back(eff_ps, lb))
-        obs_e = _nearest_next_bday(_shift_business_days_back(eff_pe, lb))
+        obs_s = _shift_business_days_back(eff_ps, lb)
+        obs_e = _shift_business_days_back(eff_pe, lb)
 
         acc   = _deal_accrual_days(deal, eff_ps, eff_pe, obs_s, obs_e)
         unadj = pay_date   # payment date already adjusted in _gen_periods

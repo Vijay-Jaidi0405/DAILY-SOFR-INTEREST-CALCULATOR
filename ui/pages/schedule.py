@@ -152,7 +152,6 @@ class SchedulePage(QWidget):
         for r in rows:
             if r["period_status"] == "Calculated" and r["interest_amount"]:
                 running += r["interest_amount"]
-            rnd = r.get("rounding_decimals") or 4
             period_item = QTableWidgetItem()
             period_item.setData(Qt.EditRole, int(r["period_number"]))
             period_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignRight)
@@ -165,8 +164,8 @@ class SchedulePage(QWidget):
                 make_date_item(r["adj_payment_date"]),
                 str(r["accrual_days"]),
                 r["period_status"],
-                fmt_rate(r.get("compounded_rate"), rnd),
-                fmt_rate(r.get("annualized_rate"), rnd),
+                fmt_rate(r.get("compounded_rate")),
+                fmt_rate(r.get("annualized_rate")),
                 fmt_money(r.get("interest_amount")),
                 fmt_money(running) if r["period_status"] == "Calculated" else "—",
             ])

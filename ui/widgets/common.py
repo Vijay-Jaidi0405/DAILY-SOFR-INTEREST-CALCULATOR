@@ -226,7 +226,7 @@ def fmt_money(v) -> str:
         return str(v)
 
 
-def fmt_rate(v, decimals=4) -> str:
+def fmt_rate(v, decimals=7) -> str:
     if v is None:
         return "—"
     try:

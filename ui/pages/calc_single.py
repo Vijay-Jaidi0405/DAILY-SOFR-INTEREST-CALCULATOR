@@ -602,8 +602,8 @@ class CalcSinglePage(QWidget):
 
     def _show_result(self, res: dict):
         rnd = res["rounding_decimals"]
-        self._k_comp.set_value(fmt_rate(res["compounded_rate"], rnd),  GREEN)
-        self._k_ann.set_value(fmt_rate(res["annualized_rate"],  rnd),  ACCENT)
+        self._k_comp.set_value(fmt_rate(res["compounded_rate"]),       GREEN)
+        self._k_ann.set_value(fmt_rate(res["annualized_rate"]),        ACCENT)
         self._k_round.set_value(fmt_rate(res["rounded_rate"],   rnd),  PURPLE)
         self._k_int.set_value(fmt_money(res["interest_amount"]),       GREEN)
         self._k_days.set_value(str(res["accrual_days"]))
@@ -650,7 +650,7 @@ class CalcSinglePage(QWidget):
     <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Spread</td>
     <td style='padding:10px 14px; font-weight:600;'>{res.get('spread', 0):.4f}%</td>
     <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>All-in Annualized</td>
-    <td style='padding:10px 14px; font-weight:700; color:#1E40AF;'>{fmt_rate(res['annualized_rate'], rnd)}</td>
+    <td style='padding:10px 14px; font-weight:700; color:#1E40AF;'>{fmt_rate(res['annualized_rate'])}</td>
   </tr>
 </table>
 

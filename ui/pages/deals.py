@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QFrame, QGroupBox
 )
 from PySide6.QtCore import Qt, QDate, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIntValidator
 from ui.widgets.common import (
     Panel, PageHeader, DataTable, fmt_money, fmt_date, make_date_item
 )
@@ -17,7 +17,6 @@ METHODS    = ["Compounded in Arrears", "Simple Average in Arrears", "SOFR Index"
 RATE_TYPES = ["SOFR", "SOFR Index"]
 FREQS      = ["Monthly", "Quarterly"]
 YN         = ["N", "Y"]
-ROUNDINGS  = [4, 5, 6]
 LOOKBACKS  = [2, 3, 5]
 ACCRUAL_BASES = ["Calendar Days", "Observation Period Days"]
 
@@ -120,7 +119,12 @@ class DealDialog(QDialog):
         self.f_rate_type   = combo(RATE_TYPES)
         self.f_method      = combo(METHODS)
         self.f_frequency   = combo(FREQS)
-        self.f_rounding    = combo(ROUNDINGS)
+        self.f_rounding    = QComboBox()
+        self.f_rounding.setEditable(True)
+        self.f_rounding.addItems(["7", "4", "5", "6"])
+        self.f_rounding.setCurrentText("7")
+        self.f_rounding.setInsertPolicy(QComboBox.NoInsert)
+        self.f_rounding.lineEdit().setValidator(QIntValidator(0, 12, self))
 
         form2.addRow("Rate Type *",          self.f_rate_type)
         form2.addRow("Calculation Method *", self.f_method)
@@ -434,6 +438,12 @@ class DealDialog(QDialog):
         if (self.f_shifted_int.currentText() == "Y"
                 and self.f_obs_shift.currentText() == "N"):
             errs.append("Shifted Interest = Y requires Observation Shift = Y")
+        try:
+            rounding_decimals = int(self.f_rounding.currentText())
+            if not 0 <= rounding_decimals <= 12:
+                errs.append("Rounding Decimals must be between 0 and 12")
+        except ValueError:
+            errs.append("Rounding Decimals must be a whole number")
         if errs:
             QMessageBox.warning(self, "Validation Errors",
                 "\n".join(f"• {e}" for e in errs))
@@ -458,7 +468,7 @@ class DealDialog(QDialog):
                                    else 0),
             "look_back_days":     int(self.f_lookback.currentText()),
             "accrual_day_basis":  self.f_accrual_basis.currentText(),
-            "rounding_decimals":  int(self.f_rounding.currentText()),
+            "rounding_decimals":  int(self.f_rounding.currentText() or "7"),
             "first_payment_date": self.f_first_payment.date().toString("yyyy-MM-dd"),
             "maturity_date":      self.f_maturity.date().toString("yyyy-MM-dd"),
         }

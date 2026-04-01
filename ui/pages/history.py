@@ -115,7 +115,7 @@ class HistoryPage(QWidget):
 
         table_rows = []
         for r in rows:
-            rnd = r.get("rounding_decimals") or 4
+            rnd = r.get("rounding_decimals") or 7
             bid = r.get("batch_id") or ""
             table_rows.append([
                 str(r["log_id"]),
@@ -129,8 +129,8 @@ class HistoryPage(QWidget):
                 make_date_item(r.get("obs_end_date")),
                 str(r["accrual_days"]),
                 str(r["day_count_basis"]),
-                fmt_rate(r.get("compounded_rate"), 6),
-                fmt_rate(r.get("annualized_rate"), 6),
+                fmt_rate(r.get("compounded_rate")),
+                fmt_rate(r.get("annualized_rate")),
                 fmt_rate(r.get("rounded_rate"), rnd),
                 fmt_money(r["interest_amount"]),
                 make_date_item(r.get("payment_date")),

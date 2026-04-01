@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS deal_master (
     observation_shift   TEXT    NOT NULL DEFAULT 'N' CHECK(observation_shift IN ('Y','N')),
     shifted_interest    TEXT    NOT NULL DEFAULT 'N' CHECK(shifted_interest IN ('Y','N')),
     payment_delay       TEXT    NOT NULL DEFAULT 'N' CHECK(payment_delay IN ('Y','N')),
-    rounding_decimals   INTEGER NOT NULL DEFAULT 4 CHECK(rounding_decimals IN (4,5,6)),
+    rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals BETWEEN 0 AND 12),
     look_back_days      INTEGER NOT NULL DEFAULT 2,
     calculation_method  TEXT    NOT NULL CHECK(calculation_method IN (
                             'Compounded in Arrears',
@@ -238,6 +238,209 @@ def init_db():
                 "ALTER TABLE deal_master ADD COLUMN accrual_day_basis "
                 "TEXT NOT NULL DEFAULT 'Calendar Days'"
             )
+        except Exception:
+            pass
+        try:
+            row = conn.execute("""
+                SELECT sql
+                FROM sqlite_master
+                WHERE type='table' AND name='deal_master'
+            """).fetchone()
+            deal_master_sql = (row["sql"] or "") if row else ""
+            if "CHECK(rounding_decimals IN (4,5,6))" in deal_master_sql:
+                conn.execute("PRAGMA foreign_keys=OFF")
+                conn.executescript("""
+                    ALTER TABLE deal_master RENAME TO deal_master_old;
+                    CREATE TABLE deal_master (
+                        deal_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                        deal_name           TEXT    NOT NULL,
+                        client_name         TEXT    NOT NULL,
+                        cusip               TEXT    NOT NULL UNIQUE,
+                        notional_amount     REAL    NOT NULL,
+                        spread              REAL    NOT NULL DEFAULT 0,
+                        accrual_day_basis   TEXT    NOT NULL DEFAULT 'Calendar Days'
+                                                CHECK(accrual_day_basis IN ('Calendar Days','Observation Period Days')),
+                        rate_type           TEXT    NOT NULL CHECK(rate_type IN ('SOFR','SOFR Index')),
+                        payment_frequency   TEXT    NOT NULL CHECK(payment_frequency IN ('Monthly','Quarterly')),
+                        observation_shift   TEXT    NOT NULL DEFAULT 'N' CHECK(observation_shift IN ('Y','N')),
+                        shifted_interest    TEXT    NOT NULL DEFAULT 'N' CHECK(shifted_interest IN ('Y','N')),
+                        payment_delay       TEXT    NOT NULL DEFAULT 'N' CHECK(payment_delay IN ('Y','N')),
+                        rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals BETWEEN 0 AND 12),
+                        look_back_days      INTEGER NOT NULL DEFAULT 2,
+                        calculation_method  TEXT    NOT NULL CHECK(calculation_method IN (
+                                                'Compounded in Arrears',
+                                                'Simple Average in Arrears',
+                                                'SOFR Index')),
+                        first_payment_date  TEXT    NOT NULL,
+                        maturity_date       TEXT    NOT NULL,
+                        payment_delay_days  INTEGER NOT NULL DEFAULT 0,
+                        status              TEXT    NOT NULL DEFAULT 'Active' CHECK(status IN ('Active','Inactive','Matured')),
+                        created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+                        modified_at         TEXT    NOT NULL DEFAULT (datetime('now')),
+                        CHECK(NOT (rate_type='SOFR Index' AND calculation_method != 'SOFR Index')),
+                        CHECK(NOT (rate_type='SOFR'       AND calculation_method  = 'SOFR Index')),
+                        CHECK(NOT (shifted_interest='Y'   AND observation_shift   = 'N')),
+                        CHECK(maturity_date > first_payment_date)
+                    );
+                    INSERT INTO deal_master (
+                        deal_id, deal_name, client_name, cusip, notional_amount,
+                        spread, accrual_day_basis, rate_type, payment_frequency,
+                        observation_shift, shifted_interest, payment_delay,
+                        rounding_decimals, look_back_days, calculation_method,
+                        first_payment_date, maturity_date, payment_delay_days,
+                        status, created_at, modified_at
+                    )
+                    SELECT
+                        deal_id, deal_name, client_name, cusip, notional_amount,
+                        spread, accrual_day_basis, rate_type, payment_frequency,
+                        observation_shift, shifted_interest, payment_delay,
+                        rounding_decimals, look_back_days, calculation_method,
+                        first_payment_date, maturity_date, payment_delay_days,
+                        status, created_at, modified_at
+                    FROM deal_master_old;
+                    DROP TABLE deal_master_old;
+                """)
+                conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
+        try:
+            ps_sql_row = conn.execute("""
+                SELECT sql
+                FROM sqlite_master
+                WHERE type='table' AND name='payment_schedule'
+            """).fetchone()
+            log_sql_row = conn.execute("""
+                SELECT sql
+                FROM sqlite_master
+                WHERE type='table' AND name='calculation_log'
+            """).fetchone()
+            ps_sql = (ps_sql_row["sql"] or "") if ps_sql_row else ""
+            log_sql = (log_sql_row["sql"] or "") if log_sql_row else ""
+            if 'REFERENCES "deal_master_old"' in ps_sql or 'REFERENCES "deal_master_old"' in log_sql:
+                conn.execute("PRAGMA foreign_keys=OFF")
+                conn.executescript("""
+                    ALTER TABLE payment_schedule RENAME TO payment_schedule_old;
+                    CREATE TABLE payment_schedule (
+                        schedule_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                        deal_id                 INTEGER NOT NULL REFERENCES deal_master(deal_id),
+                        cusip                   TEXT    NOT NULL,
+                        period_number           INTEGER NOT NULL,
+                        period_start_date       TEXT    NOT NULL,
+                        period_end_date         TEXT    NOT NULL,
+                        eff_period_start_date   TEXT    NOT NULL,
+                        eff_period_end_date     TEXT    NOT NULL,
+                        obs_start_date          TEXT    NOT NULL,
+                        obs_end_date            TEXT    NOT NULL,
+                        unadj_payment_date      TEXT    NOT NULL,
+                        adj_payment_date        TEXT    NOT NULL,
+                        accrual_days            INTEGER NOT NULL,
+                        notional_amount         REAL    NOT NULL,
+                        compounded_rate         REAL,
+                        annualized_rate         REAL,
+                        rounded_rate            REAL,
+                        interest_amount         REAL,
+                        period_status           TEXT    NOT NULL DEFAULT 'Scheduled'
+                                                    CHECK(period_status IN ('Scheduled','Ready to Calculate','Calculated')),
+                        is_calc_eligible_today  INTEGER NOT NULL DEFAULT 0,
+                        obs_rates_available     INTEGER NOT NULL DEFAULT 0,
+                        period_ended_by_today   INTEGER NOT NULL DEFAULT 0,
+                        missing_rate_dates      TEXT,
+                        is_next_payment_period  INTEGER NOT NULL DEFAULT 0,
+                        rate_determination_date TEXT,
+                        generated_at            TEXT    NOT NULL DEFAULT (datetime('now')),
+                        status_refreshed_at     TEXT,
+                        calculated_at           TEXT,
+                        calculated_by           TEXT,
+                        UNIQUE(deal_id, period_number)
+                    );
+                    INSERT INTO payment_schedule (
+                        schedule_id, deal_id, cusip, period_number,
+                        period_start_date, period_end_date,
+                        eff_period_start_date, eff_period_end_date,
+                        obs_start_date, obs_end_date,
+                        unadj_payment_date, adj_payment_date,
+                        accrual_days, notional_amount,
+                        compounded_rate, annualized_rate,
+                        rounded_rate, interest_amount,
+                        period_status, is_calc_eligible_today,
+                        obs_rates_available, period_ended_by_today,
+                        missing_rate_dates, is_next_payment_period,
+                        rate_determination_date, generated_at,
+                        status_refreshed_at, calculated_at, calculated_by
+                    )
+                    SELECT
+                        schedule_id, deal_id, cusip, period_number,
+                        period_start_date, period_end_date,
+                        eff_period_start_date, eff_period_end_date,
+                        obs_start_date, obs_end_date,
+                        unadj_payment_date, adj_payment_date,
+                        accrual_days, notional_amount,
+                        compounded_rate, annualized_rate,
+                        rounded_rate, interest_amount,
+                        period_status, is_calc_eligible_today,
+                        obs_rates_available, period_ended_by_today,
+                        missing_rate_dates, is_next_payment_period,
+                        rate_determination_date, generated_at,
+                        status_refreshed_at, calculated_at, calculated_by
+                    FROM payment_schedule_old;
+                    DROP TABLE payment_schedule_old;
+
+                    ALTER TABLE calculation_log RENAME TO calculation_log_old;
+                    CREATE TABLE calculation_log (
+                        log_id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                        deal_id                 INTEGER NOT NULL REFERENCES deal_master(deal_id),
+                        cusip                   TEXT    NOT NULL,
+                        calculation_method      TEXT    NOT NULL,
+                        period_start_date       TEXT    NOT NULL,
+                        period_end_date         TEXT    NOT NULL,
+                        obs_start_date          TEXT,
+                        obs_end_date            TEXT,
+                        payment_date            TEXT    NOT NULL,
+                        adjusted_payment_date   TEXT    NOT NULL,
+                        payment_delay_days      INTEGER NOT NULL DEFAULT 0,
+                        accrual_days            INTEGER NOT NULL,
+                        day_count_basis         INTEGER NOT NULL DEFAULT 360,
+                        look_back_days          INTEGER NOT NULL,
+                        notional_amount         REAL    NOT NULL,
+                        compounded_rate         REAL,
+                        annualized_rate         REAL,
+                        rounded_rate            REAL,
+                        interest_amount         REAL    NOT NULL,
+                        batch_id                TEXT,
+                        calculated_at           TEXT    NOT NULL DEFAULT (datetime('now')),
+                        calculated_by           TEXT    NOT NULL DEFAULT 'system'
+                    );
+                    INSERT INTO calculation_log (
+                        log_id, deal_id, cusip, calculation_method,
+                        period_start_date, period_end_date,
+                        obs_start_date, obs_end_date,
+                        payment_date, adjusted_payment_date,
+                        payment_delay_days, accrual_days, day_count_basis,
+                        look_back_days, notional_amount, compounded_rate,
+                        annualized_rate, rounded_rate, interest_amount,
+                        batch_id, calculated_at, calculated_by
+                    )
+                    SELECT
+                        log_id, deal_id, cusip, calculation_method,
+                        period_start_date, period_end_date,
+                        obs_start_date, obs_end_date,
+                        payment_date, adjusted_payment_date,
+                        payment_delay_days, accrual_days, day_count_basis,
+                        look_back_days, notional_amount, compounded_rate,
+                        annualized_rate, rounded_rate, interest_amount,
+                        batch_id, calculated_at, calculated_by
+                    FROM calculation_log_old;
+                    DROP TABLE calculation_log_old;
+
+                    CREATE INDEX IF NOT EXISTS ix_schedule_cusip       ON payment_schedule(cusip);
+                    CREATE INDEX IF NOT EXISTS ix_schedule_status      ON payment_schedule(period_status);
+                    CREATE INDEX IF NOT EXISTS ix_schedule_eligible    ON payment_schedule(is_calc_eligible_today);
+                    CREATE INDEX IF NOT EXISTS ix_schedule_next        ON payment_schedule(is_next_payment_period);
+                    CREATE INDEX IF NOT EXISTS ix_schedule_rdd         ON payment_schedule(rate_determination_date);
+                    CREATE INDEX IF NOT EXISTS ix_log_cusip            ON calculation_log(cusip);
+                    CREATE INDEX IF NOT EXISTS ix_log_batch            ON calculation_log(batch_id);
+                """)
+                conn.execute("PRAGMA foreign_keys=ON")
         except Exception:
             pass
 
@@ -647,11 +850,10 @@ def _calc_index(conn, deal: dict, p_start: date, p_end: date,
             f"Period start {p_start} must be before period end {p_end}."
         )
 
-    # Core formula: (Index_end / Index_start - 1) x (DC / accrual_days)
+    # Index return is already the period return for the accrual window.
     index_return = idx_end / idx_start - 1.0
     ann_rate     = index_return * (dc / accrual)
-    # Interest = Notional x (Index_end/Index_start - 1) x (Accrual Days / DC)
-    interest     = deal["notional_amount"] * index_return * accrual / dc
+    interest     = deal["notional_amount"] * index_return
 
     daily_rows = [
         {

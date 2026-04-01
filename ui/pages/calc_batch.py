@@ -260,15 +260,15 @@ class CalcBatchPage(QWidget):
 
         rows, colors = [], []
         for r in results:
-            rnd = r.get("rounding_decimals") or 4
+            rnd = r.get("rounding_decimals") or 7
             rows.append([
                 r["cusip"],
                 r.get("deal_name", "—"),
                 r.get("client_name", "—"),
                 r.get("calculation_method", "—"),
                 str(r.get("accrual_days", "—")),
-                fmt_rate(r.get("compounded_rate"), rnd),
-                fmt_rate(r.get("annualized_rate"), rnd),
+                fmt_rate(r.get("compounded_rate")),
+                fmt_rate(r.get("annualized_rate")),
                 fmt_money(r.get("interest_amount")),
                 make_date_item(r.get("adjusted_payment_date")),
                 r.get("status", "—"),

@@ -198,7 +198,7 @@ def generate_calculation_pdf(result: dict,
 
     # ── Story ────────────────────────────────────────────────────────────────
     story = []
-    rnd   = result.get("rounding_decimals", 6)
+    rnd   = result.get("rounding_decimals", 7)
     calc_ts = created_at.strftime("%d-%b-%Y %H:%M:%S")
 
     method_color_map = {
@@ -250,7 +250,7 @@ def generate_calculation_pdf(result: dict,
         ["Notional",     _fmt_money(result.get("notional_amount")),
          "Frequency",    result.get("payment_frequency","—")],
         ["Spread",       f"{float(result.get('spread', 0) or 0):.4f}%",
-         "All-in Ann.",  _fmt_rate(result.get("annualized_rate"), rnd)],
+         "All-in Ann.",  _fmt_rate(result.get("annualized_rate"), 7)],
         ["Calc Method",  method,
          "Obs Shift",    result.get("observation_shift","—")],
         ["Shifted Int",  result.get("shifted_interest","—"),
@@ -308,8 +308,8 @@ def generate_calculation_pdf(result: dict,
 
     # Large result metrics in a 4-column grid
     metrics = [
-        ("Compounded / Avg Rate", _fmt_rate(result.get("compounded_rate"), rnd), c_green),
-        ("Annualized Rate",       _fmt_rate(result.get("annualized_rate"), rnd), c_navy),
+        ("Compounded / Avg Rate", _fmt_rate(result.get("compounded_rate"), 7), c_green),
+        ("Annualized Rate",       _fmt_rate(result.get("annualized_rate"), 7), c_navy),
         ("Rounded Rate",          _fmt_rate(result.get("rounded_rate"),    rnd), c_purple),
         ("Interest Amount",       _fmt_money(result.get("interest_amount")),     c_green),
     ]
@@ -592,7 +592,7 @@ def generate_batch_pdf(results: list[dict],
 
     tbl_data = [[Paragraph(h, s_chdr) for h in headers]]
     for r in results:
-        rnd = r.get("rounding_decimals") or 4
+        rnd = r.get("rounding_decimals") or 7
         row_color = HexColor("#FEF2F2") if r.get("status") != "OK" else None
         tbl_data.append([
             Paragraph(r.get("cusip",""), s_cell),
@@ -600,8 +600,8 @@ def generate_batch_pdf(results: list[dict],
             Paragraph(r.get("client_name","")[:18], s_cell),
             Paragraph(r.get("calculation_method","")[:22], s_cell),
             Paragraph(str(r.get("accrual_days","—")), s_cell),
-            Paragraph(_fmt_rate(r.get("compounded_rate"), rnd), s_cell),
-            Paragraph(_fmt_rate(r.get("annualized_rate"), rnd), s_cell),
+            Paragraph(_fmt_rate(r.get("compounded_rate"), 7), s_cell),
+            Paragraph(_fmt_rate(r.get("annualized_rate"), 7), s_cell),
             Paragraph(_fmt_money(r.get("interest_amount")), s_cell),
             Paragraph(_fmt_date(r.get("adjusted_payment_date")), s_cell),
             Paragraph(r.get("status","—"), s_cell),

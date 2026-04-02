@@ -13,6 +13,164 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "sofr_calculator.db"
 
+DEFAULT_HOLIDAY_CALENDAR = "SIFMA"
+HOLIDAY_CALENDAR_OPTIONS = [
+    ("SIFMA", "SIFMA"),
+    ("LONDON", "London"),
+    ("TOKYO", "Tokyo"),
+]
+HOLIDAY_CALENDAR_LABELS = {
+    code: label for code, label in HOLIDAY_CALENDAR_OPTIONS
+}
+SUPPORTED_HOLIDAY_YEARS = range(2024, 2029)
+
+
+def normalize_holiday_calendar(value) -> str:
+    if isinstance(value, (list, tuple, set)):
+        raw_codes = [str(v).strip().upper() for v in value]
+    else:
+        text = str(value or DEFAULT_HOLIDAY_CALENDAR).replace(",", "|")
+        raw_codes = [part.strip().upper() for part in text.split("|")]
+
+    allowed = {code for code, _ in HOLIDAY_CALENDAR_OPTIONS}
+    codes = [code for code, _ in HOLIDAY_CALENDAR_OPTIONS
+             if code in raw_codes and code in allowed]
+    if DEFAULT_HOLIDAY_CALENDAR not in codes:
+        codes.insert(0, DEFAULT_HOLIDAY_CALENDAR)
+    return "|".join(dict.fromkeys(codes))
+
+
+def holiday_calendar_codes(value) -> list[str]:
+    return normalize_holiday_calendar(value).split("|")
+
+
+def holiday_calendar_label(value) -> str:
+    return " + ".join(
+        HOLIDAY_CALENDAR_LABELS.get(code, code)
+        for code in holiday_calendar_codes(value)
+    )
+
+
+def _easter_sunday(year: int) -> date:
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
+    d = date(year, month, 1)
+    while d.weekday() != weekday:
+        d += timedelta(days=1)
+    d += timedelta(days=(occurrence - 1) * 7)
+    return d
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        d = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        d = date(year, month + 1, 1) - timedelta(days=1)
+    while d.weekday() != weekday:
+        d -= timedelta(days=1)
+    return d
+
+
+def _observed_uk_new_year(year: int) -> tuple[date, str]:
+    d = date(year, 1, 1)
+    if d.weekday() == 5:
+        return date(year, 1, 3), "New Year's Day (substitute day)"
+    if d.weekday() == 6:
+        return date(year, 1, 2), "New Year's Day (substitute day)"
+    return d, "New Year's Day"
+
+
+def _generate_london_holidays(year: int) -> list[tuple[str, str]]:
+    easter = _easter_sunday(year)
+    new_year_date, new_year_name = _observed_uk_new_year(year)
+    holidays = [
+        (new_year_date, new_year_name),
+        (easter - timedelta(days=2), "Good Friday"),
+        (easter + timedelta(days=1), "Easter Monday"),
+        (_nth_weekday(year, 5, 0, 1), "Early May Bank Holiday"),
+        (_last_weekday(year, 5, 0), "Spring Bank Holiday"),
+        (_last_weekday(year, 8, 0), "Summer Bank Holiday"),
+    ]
+
+    dec_25 = date(year, 12, 25)
+    if dec_25.weekday() == 5:
+        holidays.append((date(year, 12, 27), "Christmas Day (substitute day)"))
+        holidays.append((date(year, 12, 28), "Boxing Day (substitute day)"))
+    elif dec_25.weekday() == 6:
+        holidays.append((date(year, 12, 27), "Christmas Day (substitute day)"))
+        holidays.append((date(year, 12, 26), "Boxing Day"))
+    else:
+        holidays.append((dec_25, "Christmas Day"))
+        dec_26 = date(year, 12, 26)
+        if dec_26.weekday() == 5:
+            holidays.append((date(year, 12, 28), "Boxing Day (substitute day)"))
+        else:
+            holidays.append((dec_26, "Boxing Day"))
+
+    return [(d.isoformat(), name) for d, name in sorted(holidays)]
+
+
+def _vernal_equinox_day(year: int) -> int:
+    return int(20.8431 + 0.242194 * (year - 1980) - (year - 1980) // 4)
+
+
+def _autumnal_equinox_day(year: int) -> int:
+    return int(23.2488 + 0.242194 * (year - 1980) - (year - 1980) // 4)
+
+
+def _generate_tokyo_holidays(year: int) -> list[tuple[str, str]]:
+    holidays: dict[date, str] = {
+        date(year, 1, 1): "New Year's Day",
+        _nth_weekday(year, 1, 0, 2): "Coming of Age Day",
+        date(year, 2, 11): "National Foundation Day",
+        date(year, 2, 23): "Emperor's Birthday",
+        date(year, 3, _vernal_equinox_day(year)): "Vernal Equinox Day",
+        date(year, 4, 29): "Showa Day",
+        date(year, 5, 3): "Constitution Memorial Day",
+        date(year, 5, 4): "Greenery Day",
+        date(year, 5, 5): "Children's Day",
+        _nth_weekday(year, 7, 0, 3): "Marine Day",
+        date(year, 8, 11): "Mountain Day",
+        _nth_weekday(year, 9, 0, 3): "Respect for the Aged Day",
+        date(year, 9, _autumnal_equinox_day(year)): "Autumnal Equinox Day",
+        _nth_weekday(year, 10, 0, 2): "Sports Day",
+        date(year, 11, 3): "Culture Day",
+        date(year, 11, 23): "Labor Thanksgiving Day",
+    }
+
+    d = date(year, 1, 2)
+    end = date(year, 12, 30)
+    while d <= end:
+        if d not in holidays and (d - timedelta(days=1)) in holidays and (d + timedelta(days=1)) in holidays:
+            holidays[d] = "Citizen's Holiday"
+        d += timedelta(days=1)
+
+    base_items = sorted(holidays.items())
+    for holiday_date, holiday_name in base_items:
+        if holiday_date.weekday() == 6:
+            sub = holiday_date + timedelta(days=1)
+            while sub in holidays:
+                sub += timedelta(days=1)
+            holidays[sub] = f"Substitute Holiday for {holiday_name}"
+
+    return [(d.isoformat(), name) for d, name in sorted(holidays.items())]
+
 # ---------------------------------------------------------------------------
 # Connection helper
 # ---------------------------------------------------------------------------
@@ -52,6 +210,7 @@ CREATE TABLE IF NOT EXISTS deal_master (
     observation_shift   TEXT    NOT NULL DEFAULT 'N' CHECK(observation_shift IN ('Y','N')),
     shifted_interest    TEXT    NOT NULL DEFAULT 'N' CHECK(shifted_interest IN ('Y','N')),
     payment_delay       TEXT    NOT NULL DEFAULT 'N' CHECK(payment_delay IN ('Y','N')),
+    holiday_calendar    TEXT    NOT NULL DEFAULT 'SIFMA',
     rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals BETWEEN 0 AND 12),
     look_back_days      INTEGER NOT NULL DEFAULT 2,
     calculation_method  TEXT    NOT NULL CHECK(calculation_method IN (
@@ -87,7 +246,8 @@ CREATE TABLE IF NOT EXISTS sofr_index (
 
 CREATE TABLE IF NOT EXISTS market_holidays (
     holiday_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    holiday_date    TEXT    NOT NULL UNIQUE,
+    calendar_code   TEXT    NOT NULL,
+    holiday_date    TEXT    NOT NULL,
     holiday_name    TEXT    NOT NULL
 );
 
@@ -162,7 +322,7 @@ CREATE INDEX IF NOT EXISTS ix_log_batch            ON calculation_log(batch_id);
 CREATE INDEX IF NOT EXISTS ix_holidays_date        ON market_holidays(holiday_date);
 """
 
-SEED_HOLIDAYS = [
+SIFMA_SEED_HOLIDAYS = [
     ("2024-01-01","New Year's Day"),("2024-01-15","MLK Day"),
     ("2024-02-19","Presidents Day"),("2024-05-27","Memorial Day"),
     ("2024-06-19","Juneteenth"),("2024-07-04","Independence Day"),
@@ -191,18 +351,46 @@ SEED_HOLIDAYS = [
 ]
 
 
-# Pre-computed holiday set for connection-free date rolling
-# (used by _nearest_prev_bday and _nearest_next_bday during schedule generation)
-_HOLIDAY_SET: set = {
-    date.fromisoformat(h[0]) for h in SEED_HOLIDAYS
-}
+def _build_seed_holiday_rows() -> list[tuple[str, str, str]]:
+    rows = [("SIFMA", d, name) for d, name in SIFMA_SEED_HOLIDAYS]
+    for year in SUPPORTED_HOLIDAY_YEARS:
+        rows.extend(("LONDON", d, name) for d, name in _generate_london_holidays(year))
+        rows.extend(("TOKYO", d, name) for d, name in _generate_tokyo_holidays(year))
+    return rows
+
+
+SEED_HOLIDAY_ROWS = _build_seed_holiday_rows()
+
+
+# Pre-computed holiday sets for connection-free date rolling.
+_HOLIDAY_SETS: dict[str, set[date]] = {code: set() for code, _ in HOLIDAY_CALENDAR_OPTIONS}
+for calendar_code, holiday_date, _holiday_name in SEED_HOLIDAY_ROWS:
+    _HOLIDAY_SETS.setdefault(calendar_code, set()).add(date.fromisoformat(holiday_date))
 
 
 def _update_holiday_set(conn) -> None:
-    """Reload _HOLIDAY_SET from the database (call after importing new holidays)."""
-    global _HOLIDAY_SET
-    rows = conn.execute("SELECT holiday_date FROM market_holidays").fetchall()
-    _HOLIDAY_SET = {date.fromisoformat(r["holiday_date"]) for r in rows}
+    """Reload cached holiday sets from the database."""
+    global _HOLIDAY_SETS
+    holiday_sets = {code: set() for code, _ in HOLIDAY_CALENDAR_OPTIONS}
+    rows = conn.execute(
+        "SELECT calendar_code, holiday_date FROM market_holidays"
+    ).fetchall()
+    for row in rows:
+        holiday_sets.setdefault(row["calendar_code"], set()).add(
+            date.fromisoformat(row["holiday_date"])
+        )
+    _HOLIDAY_SETS = holiday_sets
+
+
+def _holiday_dates_for_codes(codes) -> set[date]:
+    dates: set[date] = set()
+    for code in holiday_calendar_codes(codes):
+        dates.update(_HOLIDAY_SETS.get(code, set()))
+    return dates
+
+
+def _is_business_day_in_set(d: date, holiday_dates: set[date]) -> bool:
+    return d.weekday() < 5 and d not in holiday_dates
 
 
 def init_db():
@@ -241,6 +429,13 @@ def init_db():
         except Exception:
             pass
         try:
+            conn.execute(
+                "ALTER TABLE deal_master ADD COLUMN holiday_calendar "
+                "TEXT NOT NULL DEFAULT 'SIFMA'"
+            )
+        except Exception:
+            pass
+        try:
             row = conn.execute("""
                 SELECT sql
                 FROM sqlite_master
@@ -265,6 +460,7 @@ def init_db():
                         observation_shift   TEXT    NOT NULL DEFAULT 'N' CHECK(observation_shift IN ('Y','N')),
                         shifted_interest    TEXT    NOT NULL DEFAULT 'N' CHECK(shifted_interest IN ('Y','N')),
                         payment_delay       TEXT    NOT NULL DEFAULT 'N' CHECK(payment_delay IN ('Y','N')),
+                        holiday_calendar    TEXT    NOT NULL DEFAULT 'SIFMA',
                         rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals BETWEEN 0 AND 12),
                         look_back_days      INTEGER NOT NULL DEFAULT 2,
                         calculation_method  TEXT    NOT NULL CHECK(calculation_method IN (
@@ -285,7 +481,7 @@ def init_db():
                     INSERT INTO deal_master (
                         deal_id, deal_name, client_name, cusip, notional_amount,
                         spread, accrual_day_basis, rate_type, payment_frequency,
-                        observation_shift, shifted_interest, payment_delay,
+                        observation_shift, shifted_interest, payment_delay, holiday_calendar,
                         rounding_decimals, look_back_days, calculation_method,
                         first_payment_date, maturity_date, payment_delay_days,
                         status, created_at, modified_at
@@ -294,6 +490,7 @@ def init_db():
                         deal_id, deal_name, client_name, cusip, notional_amount,
                         spread, accrual_day_basis, rate_type, payment_frequency,
                         observation_shift, shifted_interest, payment_delay,
+                        COALESCE(holiday_calendar, 'SIFMA'),
                         rounding_decimals, look_back_days, calculation_method,
                         first_payment_date, maturity_date, payment_delay_days,
                         status, created_at, modified_at
@@ -474,10 +671,38 @@ def init_db():
                 """)
         except Exception as e:
             pass  # already migrated or fresh DB
+        try:
+            holiday_cols = [
+                r[1] for r in conn.execute("PRAGMA table_info(market_holidays)").fetchall()
+            ]
+            if "calendar_code" not in holiday_cols:
+                conn.execute("PRAGMA foreign_keys=OFF")
+                conn.executescript("""
+                    ALTER TABLE market_holidays RENAME TO market_holidays_old;
+                    CREATE TABLE market_holidays (
+                        holiday_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                        calendar_code   TEXT    NOT NULL,
+                        holiday_date    TEXT    NOT NULL,
+                        holiday_name    TEXT    NOT NULL
+                    );
+                    INSERT INTO market_holidays (calendar_code, holiday_date, holiday_name)
+                    SELECT 'SIFMA', holiday_date, holiday_name
+                    FROM market_holidays_old;
+                    DROP TABLE market_holidays_old;
+                    CREATE UNIQUE INDEX IF NOT EXISTS ix_holidays_calendar_date
+                        ON market_holidays(calendar_code, holiday_date);
+                    CREATE INDEX IF NOT EXISTS ix_holidays_date
+                        ON market_holidays(holiday_date);
+                """)
+                conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
         conn.executemany(
-            "INSERT OR IGNORE INTO market_holidays(holiday_date,holiday_name) VALUES(?,?)",
-            SEED_HOLIDAYS
+            "INSERT OR IGNORE INTO market_holidays(calendar_code, holiday_date, holiday_name) "
+            "VALUES(?,?,?)",
+            SEED_HOLIDAY_ROWS
         )
+        _update_holiday_set(conn)
         auto_mature_deals(conn)
 
 
@@ -486,19 +711,13 @@ def init_db():
 # ---------------------------------------------------------------------------
 
 def _is_business_day(conn, d: date) -> bool:
-    dow = d.weekday()   # Mon=0 … Sun=6
-    if dow >= 5:
-        return False
-    ds = d.isoformat()
-    row = conn.execute(
-        "SELECT 1 FROM market_holidays WHERE holiday_date=?", (ds,)
-    ).fetchone()
-    return row is None
+    return _is_business_day_in_set(d, _holiday_dates_for_codes(DEFAULT_HOLIDAY_CALENDAR))
 
 
-def _next_business_day(conn, d: date) -> date:
+def _next_business_day(conn, d: date, holiday_calendar=DEFAULT_HOLIDAY_CALENDAR) -> date:
+    holiday_dates = _holiday_dates_for_codes(holiday_calendar)
     for _ in range(14):
-        if _is_business_day(conn, d):
+        if _is_business_day_in_set(d, holiday_dates):
             return d
         d += timedelta(days=1)
     return d
@@ -508,16 +727,18 @@ def _shift_date_back(d: date, n: int) -> date:
     return d - timedelta(days=n)
 
 
-def _shift_business_days_back(d: date, n: int) -> date:
-    """Shift backward by n business days using weekends and seeded holidays."""
+def _shift_business_days_back(d: date, n: int,
+                              holiday_calendar=DEFAULT_HOLIDAY_CALENDAR) -> date:
+    """Shift backward by n business days using weekends and selected holidays."""
     if n <= 0:
         return d
 
+    holiday_dates = _holiday_dates_for_codes(holiday_calendar)
     remaining = n
     cur = d
     while remaining > 0:
         cur -= timedelta(days=1)
-        if cur.weekday() < 5 and cur not in _HOLIDAY_SET:
+        if _is_business_day_in_set(cur, holiday_dates):
             remaining -= 1
     return cur
 
@@ -558,20 +779,26 @@ def _deal_accrual_days(deal: dict, calendar_start: date, calendar_end: date,
     return _accrual_days(calendar_start, calendar_end)
 
 
-def _iter_business_days(start: date, end: date):
+def _iter_business_days(start: date, end: date,
+                        holiday_calendar=DEFAULT_HOLIDAY_CALENDAR):
     """Yield (calendar_date, day_weight) for each business day in [start, end)."""
+    holiday_dates = _holiday_dates_for_codes(holiday_calendar)
     d = start
     while d < end:
-        dow = d.weekday()
-        if dow < 5:
-            wt = 3 if dow == 4 else 1   # Friday=3, else 1
+        if _is_business_day_in_set(d, holiday_dates):
+            next_d = d + timedelta(days=1)
+            while next_d < end and not _is_business_day_in_set(next_d, holiday_dates):
+                next_d += timedelta(days=1)
+            wt = (next_d if next_d < end else end) - d
+            wt = wt.days
             yield d, wt
         d += timedelta(days=1)
 
 
-def _last_business_day_before(d: date) -> date:
+def _last_business_day_before(d: date,
+                              holiday_calendar=DEFAULT_HOLIDAY_CALENDAR) -> date:
     """Return the last business day strictly before the exclusive end date."""
-    return _shift_business_days_back(d, 1)
+    return _shift_business_days_back(d, 1, holiday_calendar=holiday_calendar)
 
 
 def _is_good_friday(d: date) -> bool:
@@ -658,7 +885,8 @@ def _get_rate(conn, d: date):
 
 
 def _check_obs_rates_available(conn, obs_start: date, obs_end: date,
-                               is_index: bool = False) -> bool:
+                               is_index: bool = False,
+                               holiday_calendar=DEFAULT_HOLIDAY_CALENDAR) -> bool:
     """Check whether all required rates are loaded for the observation window."""
     if is_index:
         # For SOFR Index deals: check sofr_index table
@@ -672,7 +900,10 @@ def _check_obs_rates_available(conn, obs_start: date, obs_end: date,
         r2 = _nearest_index_date(conn, obs_end)
         return r1 is not None and r2 is not None
     else:
-        last_required = _last_business_day_before(obs_end)
+        last_required = _last_business_day_before(
+            obs_end,
+            holiday_calendar=holiday_calendar
+        )
         # For SOFR rate deals: check sofr_rates table
         max_row = conn.execute("SELECT MAX(rate_date) AS mx FROM sofr_rates").fetchone()
         if not max_row or not max_row["mx"]:
@@ -698,21 +929,22 @@ def _check_obs_rates_available(conn, obs_start: date, obs_end: date,
 def _calc_compounded(conn, deal: dict, p_start: date, p_end: date,
                      dc: int = 360):
     lb = deal["look_back_days"]
+    holiday_calendar = deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
     if deal["shifted_interest"] == "Y":
-        eff_start = _shift_business_days_back(p_start, lb)
-        eff_end   = _shift_business_days_back(p_end,   lb)
+        eff_start = _shift_business_days_back(p_start, lb, holiday_calendar=holiday_calendar)
+        eff_end   = _shift_business_days_back(p_end,   lb, holiday_calendar=holiday_calendar)
     else:
         eff_start, eff_end = p_start, p_end
 
-    obs_start = _shift_business_days_back(eff_start, lb)
-    obs_end   = _shift_business_days_back(eff_end,   lb)
+    obs_start = _shift_business_days_back(eff_start, lb, holiday_calendar=holiday_calendar)
+    obs_end   = _shift_business_days_back(eff_end,   lb, holiday_calendar=holiday_calendar)
     accrual   = _deal_accrual_days(deal, eff_start, eff_end, obs_start, obs_end)
 
     product    = 1.0
     daily_rows = []
 
-    for cal_date, wt in _iter_business_days(eff_start, eff_end):
-        obs_date  = _shift_business_days_back(cal_date, lb)
+    for cal_date, wt in _iter_business_days(eff_start, eff_end, holiday_calendar=holiday_calendar):
+        obs_date  = _shift_business_days_back(cal_date, lb, holiday_calendar=holiday_calendar)
         is_gf     = _is_good_friday(obs_date)
         row       = _get_rate(conn, obs_date)
         if row:
@@ -738,15 +970,16 @@ def _calc_compounded(conn, deal: dict, p_start: date, p_end: date,
 def _calc_simple_average(conn, deal: dict, p_start: date, p_end: date,
                          dc: int = 360):
     lb        = deal["look_back_days"]
-    obs_start = _shift_business_days_back(p_start, lb)
-    obs_end   = _shift_business_days_back(p_end,   lb)
+    holiday_calendar = deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
+    obs_start = _shift_business_days_back(p_start, lb, holiday_calendar=holiday_calendar)
+    obs_end   = _shift_business_days_back(p_end,   lb, holiday_calendar=holiday_calendar)
     accrual   = _deal_accrual_days(deal, p_start, p_end, obs_start, obs_end)
 
     sum_w, sum_d = 0.0, 0
     daily_rows   = []
 
-    for cal_date, wt in _iter_business_days(p_start, p_end):
-        obs_date = _shift_business_days_back(cal_date, lb)
+    for cal_date, wt in _iter_business_days(p_start, p_end, holiday_calendar=holiday_calendar):
+        obs_date = _shift_business_days_back(cal_date, lb, holiday_calendar=holiday_calendar)
         is_gf    = _is_good_friday(obs_date)
         row      = _get_rate(conn, obs_date)
         if row:
@@ -791,10 +1024,11 @@ def _calc_index(conn, deal: dict, p_start: date, p_end: date,
     the index is looked up look_back_days BEFORE the period boundary.
     """
     lb = deal["look_back_days"]
+    holiday_calendar = deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
 
     # Observation dates: period boundaries shifted back by business-day lookback
-    obs_start_raw = _shift_business_days_back(p_start, lb)
-    obs_end_raw   = _shift_business_days_back(p_end,   lb)
+    obs_start_raw = _shift_business_days_back(p_start, lb, holiday_calendar=holiday_calendar)
+    obs_end_raw   = _shift_business_days_back(p_end,   lb, holiday_calendar=holiday_calendar)
 
     # Find nearest published index dates on or before each obs date
     obs_start_d = _nearest_index_date(conn, obs_start_raw)
@@ -917,7 +1151,10 @@ def _calculate_interest_for_deal(conn, deal: dict, cusip: str,
 
     actual_delay = delay_days if deal["payment_delay"] == "Y" else 0
     raw_pay      = payment_date + timedelta(days=actual_delay)
-    adj_pay      = _next_business_day(conn, raw_pay)
+    adj_pay      = _next_business_day(
+        conn, raw_pay,
+        holiday_calendar=deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
+    )
     rounded_rate = round(all_in_annual_rate, deal["rounding_decimals"])
 
     result = {
@@ -1017,22 +1254,27 @@ def _add_months(d: date, months: int) -> date:
     return date(y, m, day)
 
 
-def _nearest_prev_bday(d: date) -> date:
+def _nearest_prev_bday(d: date,
+                       holiday_calendar=DEFAULT_HOLIDAY_CALENDAR) -> date:
     """Roll backward to the nearest business day (Mon-Fri, non-holiday)."""
-    while d.weekday() >= 5 or d in _HOLIDAY_SET:
+    holiday_dates = _holiday_dates_for_codes(holiday_calendar)
+    while not _is_business_day_in_set(d, holiday_dates):
         d -= timedelta(days=1)
     return d
 
 
-def _nearest_next_bday(d: date) -> date:
+def _nearest_next_bday(d: date,
+                       holiday_calendar=DEFAULT_HOLIDAY_CALENDAR) -> date:
     """Roll forward to the nearest business day (Mon-Fri, non-holiday)."""
-    while d.weekday() >= 5 or d in _HOLIDAY_SET:
+    holiday_dates = _holiday_dates_for_codes(holiday_calendar)
+    while not _is_business_day_in_set(d, holiday_dates):
         d += timedelta(days=1)
     return d
 
 
 def _gen_periods(deal_start: date, maturity: date, freq: str,
-                 delay_days: int = 0):
+                 delay_days: int = 0,
+                 holiday_calendar=DEFAULT_HOLIDAY_CALENDAR):
     """
     Generate (period_number, period_start, period_end, payment_date) tuples.
 
@@ -1047,12 +1289,12 @@ def _gen_periods(deal_start: date, maturity: date, freq: str,
     (also a business day).
     """
     months        = 1 if freq == "Monthly" else 3
-    maturity_bday = _nearest_next_bday(maturity)
+    maturity_bday = _nearest_next_bday(maturity, holiday_calendar=holiday_calendar)
 
     # Period 1 starts one period BEFORE the first payment date
     # e.g. first_payment_date=09-Apr-2024, Quarterly -> period 1 start = 09-Jan-2024
     raw_p1_start = _add_months(deal_start, -months)
-    p1_start     = _nearest_next_bday(raw_p1_start)
+    p1_start     = _nearest_next_bday(raw_p1_start, holiday_calendar=holiday_calendar)
 
     periods  = []
     prev_pay = p1_start   # period 1 starts here
@@ -1061,7 +1303,7 @@ def _gen_periods(deal_start: date, maturity: date, freq: str,
     while prev_pay < maturity_bday:
         # Payment date N = first_payment_date + (N-1) * months + delay
         raw_pay  = _add_months(deal_start, months * (num - 1)) + timedelta(days=delay_days)
-        pay_date = _nearest_next_bday(raw_pay)
+        pay_date = _nearest_next_bday(raw_pay, holiday_calendar=holiday_calendar)
 
         # Cap at maturity
         if pay_date > maturity_bday:
@@ -1075,7 +1317,10 @@ def _gen_periods(deal_start: date, maturity: date, freq: str,
 
         # Guard: end must be strictly after start
         if p_end <= p_start:
-            p_end = _nearest_next_bday(p_start + timedelta(days=1))
+            p_end = _nearest_next_bday(
+                p_start + timedelta(days=1),
+                holiday_calendar=holiday_calendar
+            )
 
         periods.append((num, p_start, p_end, pay_date))
 
@@ -1108,6 +1353,7 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
     lb      = deal["look_back_days"]
     delay   = int(deal.get("payment_delay_days") or 0) if deal["payment_delay"] == "Y" else 0
     si      = deal["shifted_interest"] == "Y"
+    holiday_calendar = deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
     # first_payment_date is the anchor for all period calculations
     fpd     = date.fromisoformat(
                   deal.get("first_payment_date") or deal.get("start_date")
@@ -1116,7 +1362,8 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
 
     # Pass first_payment_date and delay into _gen_periods
     periods  = _gen_periods(fpd, d_mat, deal["payment_frequency"],
-                            delay_days=delay)
+                            delay_days=delay,
+                            holiday_calendar=holiday_calendar)
     is_index = deal["calculation_method"] == "SOFR Index"
     rows = []
     for num, ps, pe, pay_date in periods:
@@ -1126,15 +1373,15 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
 
         # Shifted-interest: effective accrual period shifted back by lookback
         if si:
-            eff_ps = _shift_business_days_back(ps, lb)
-            eff_pe = _shift_business_days_back(pe, lb)
+            eff_ps = _shift_business_days_back(ps, lb, holiday_calendar=holiday_calendar)
+            eff_pe = _shift_business_days_back(pe, lb, holiday_calendar=holiday_calendar)
         else:
             eff_ps = ps
             eff_pe = pe
 
         # Observation window = effective dates shifted back by lookback.
-        obs_s = _shift_business_days_back(eff_ps, lb)
-        obs_e = _shift_business_days_back(eff_pe, lb)
+        obs_s = _shift_business_days_back(eff_ps, lb, holiday_calendar=holiday_calendar)
+        obs_e = _shift_business_days_back(eff_pe, lb, holiday_calendar=holiday_calendar)
 
         acc   = _deal_accrual_days(deal, eff_ps, eff_pe, obs_s, obs_e)
         unadj = pay_date   # payment date already adjusted in _gen_periods
@@ -1144,9 +1391,12 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
         #   SOFR Index            -> obs_end_date
         #   Compounded/Simple Avg -> next bday after obs_end_date
         if is_index:
-            rdd = _nearest_next_bday(obs_e)
+            rdd = _nearest_next_bday(obs_e, holiday_calendar=holiday_calendar)
         else:
-            rdd = _nearest_next_bday(obs_e + timedelta(days=1))
+            rdd = _nearest_next_bday(
+                obs_e + timedelta(days=1),
+                holiday_calendar=holiday_calendar
+            )
 
         rows.append((
             deal["deal_id"], cusip, num,
@@ -1228,7 +1478,7 @@ def refresh_schedule_status(conn, cusip: str | None = None):
     args  = (cusip,) if cusip else ()
 
     rows = conn.execute(
-        f"""SELECT ps.*, d.calculation_method
+        f"""SELECT ps.*, d.calculation_method, d.holiday_calendar
             FROM payment_schedule ps
             JOIN deal_master d ON d.deal_id = ps.deal_id
             WHERE ps.period_status != 'Calculated' {where}""",
@@ -1240,9 +1490,14 @@ def refresh_schedule_status(conn, cusip: str | None = None):
         obs_e    = date.fromisoformat(row["obs_end_date"])
         eff_e    = date.fromisoformat(row["eff_period_end_date"])
         is_index = row["calculation_method"] == "SOFR Index"
+        holiday_calendar = row["holiday_calendar"] or DEFAULT_HOLIDAY_CALENDAR
 
         ended    = eff_e <= today
-        rates_ok = _check_obs_rates_available(conn, obs_s, obs_e, is_index=is_index)
+        rates_ok = _check_obs_rates_available(
+            conn, obs_s, obs_e,
+            is_index=is_index,
+            holiday_calendar=holiday_calendar
+        )
         eligible = ended and rates_ok
 
         status = "Ready to Calculate" if eligible else "Scheduled"
@@ -1403,22 +1658,23 @@ def get_deal(conn, cusip: str):
 
 def insert_deal(conn, d: dict):
     d = enforce_frequency(d)
+    holiday_calendar = normalize_holiday_calendar(d.get("holiday_calendar"))
     # Support both old start_date and new first_payment_date key names
     fpd = d.get("first_payment_date") or d.get("start_date")
     conn.execute("""
         INSERT INTO deal_master(
             deal_name, client_name, cusip, notional_amount, spread, accrual_day_basis,
             rate_type, payment_frequency, observation_shift,
-            shifted_interest, payment_delay, payment_delay_days,
+            shifted_interest, payment_delay, holiday_calendar, payment_delay_days,
             rounding_decimals, look_back_days, calculation_method,
             first_payment_date, maturity_date, status
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         d["deal_name"], d["client_name"], d["cusip"], d["notional_amount"],
         float(d.get("spread") or 0),
         d.get("accrual_day_basis", "Calendar Days"),
         d["rate_type"], d["payment_frequency"], d["observation_shift"],
-        d["shifted_interest"], d["payment_delay"],
+        d["shifted_interest"], d["payment_delay"], holiday_calendar,
         int(d.get("payment_delay_days") or 0),
         d["rounding_decimals"], d["look_back_days"], d["calculation_method"],
         fpd, d["maturity_date"], d.get("status", "Active")
@@ -1427,20 +1683,26 @@ def insert_deal(conn, d: dict):
 
 def update_deal(conn, cusip: str, d: dict):
     d = enforce_frequency(d)
+    holiday_calendar = normalize_holiday_calendar(d.get("holiday_calendar"))
     fpd = d.get("first_payment_date") or d.get("start_date")
     existing = conn.execute(
-        "SELECT spread, accrual_day_basis FROM deal_master WHERE cusip=?", (cusip,)
+        "SELECT spread, accrual_day_basis, holiday_calendar FROM deal_master WHERE cusip=?",
+        (cusip,)
     ).fetchone()
     old_spread = float(existing["spread"] or 0) if existing else 0.0
     old_accrual_basis = (
         existing["accrual_day_basis"] if existing and existing["accrual_day_basis"]
         else "Calendar Days"
     )
+    old_holiday_calendar = (
+        existing["holiday_calendar"] if existing and existing["holiday_calendar"]
+        else DEFAULT_HOLIDAY_CALENDAR
+    )
     conn.execute("""
         UPDATE deal_master SET
             deal_name=?, client_name=?, notional_amount=?, spread=?, accrual_day_basis=?,
             rate_type=?, payment_frequency=?, observation_shift=?,
-            shifted_interest=?, payment_delay=?, payment_delay_days=?,
+            shifted_interest=?, payment_delay=?, holiday_calendar=?, payment_delay_days=?,
             rounding_decimals=?, look_back_days=?, calculation_method=?,
             first_payment_date=?, maturity_date=?, status=?,
             modified_at=datetime('now')
@@ -1450,7 +1712,7 @@ def update_deal(conn, cusip: str, d: dict):
         float(d.get("spread") or 0),
         d.get("accrual_day_basis", "Calendar Days"),
         d["rate_type"], d["payment_frequency"], d["observation_shift"],
-        d["shifted_interest"], d["payment_delay"],
+        d["shifted_interest"], d["payment_delay"], holiday_calendar,
         int(d.get("payment_delay_days") or 0),
         d["rounding_decimals"], d["look_back_days"], d["calculation_method"],
         fpd, d["maturity_date"], d.get("status", "Active"),
@@ -1458,6 +1720,9 @@ def update_deal(conn, cusip: str, d: dict):
     ))
     new_spread = float(d.get("spread") or 0)
     new_accrual_basis = d.get("accrual_day_basis", "Calendar Days")
+    if normalize_holiday_calendar(old_holiday_calendar) != holiday_calendar:
+        generate_schedule(conn, cusip, rebuild=True)
+        return recalculate_existing_results(conn, cusip)
     if (abs(new_spread - old_spread) > 1e-12
             or new_accrual_basis != old_accrual_basis):
         refresh_schedule_accruals(conn, cusip)

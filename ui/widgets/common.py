@@ -3,10 +3,11 @@
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QFrame, QPushButton, QSizePolicy
+    QFrame, QPushButton, QSizePolicy, QComboBox,
+    QListView, QLineEdit
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QBrush, QFont
+from PySide6.QtGui import QColor, QBrush, QFont, QStandardItemModel, QStandardItem
 from ui.styles import GREEN, AMBER, PURPLE, RED, ACCENT
 
 
@@ -291,3 +292,83 @@ def readiness_color(status: str, eligible: int) -> str:
     if status == "Scheduled":
         return "#FFFFFF"
     return "#FFFBEB"
+
+
+# ---------------------------------------------------------------------------
+# Checkable multi-select combo
+# ---------------------------------------------------------------------------
+
+class CheckableComboBox(QComboBox):
+    selection_changed = Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setModel(QStandardItemModel(self))
+        self.setView(QListView(self))
+        self.setEditable(True)
+        line_edit = QLineEdit(self)
+        line_edit.setReadOnly(True)
+        line_edit.setPlaceholderText("Select…")
+        self.setLineEdit(line_edit)
+        self.lineEdit().selectionChanged.connect(self.lineEdit().deselect)
+        self.view().pressed.connect(self._toggle_item)
+        self._required_values: set[str] = set()
+
+    def add_check_item(self, label: str, value: str, checked: bool = False):
+        item = QStandardItem(label)
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+        item.setData(value, Qt.UserRole)
+        item.setData(Qt.Checked if checked else Qt.Unchecked, Qt.CheckStateRole)
+        self.model().appendRow(item)
+        self._refresh_text()
+
+    def set_required_values(self, values: list[str] | set[str]):
+        self._required_values = set(values)
+        for i in range(self.model().rowCount()):
+            item = self.model().item(i)
+            if item.data(Qt.UserRole) in self._required_values:
+                item.setData(Qt.Checked, Qt.CheckStateRole)
+        self._refresh_text()
+
+    def checked_values(self) -> list[str]:
+        vals = []
+        for i in range(self.model().rowCount()):
+            item = self.model().item(i)
+            if item.data(Qt.CheckStateRole) == Qt.Checked:
+                vals.append(item.data(Qt.UserRole))
+        return vals
+
+    def set_checked_values(self, values: list[str] | set[str]):
+        values = set(values)
+        values.update(self._required_values)
+        for i in range(self.model().rowCount()):
+            item = self.model().item(i)
+            state = Qt.Checked if item.data(Qt.UserRole) in values else Qt.Unchecked
+            item.setData(state, Qt.CheckStateRole)
+        self._refresh_text()
+        self.selection_changed.emit(self.checked_values())
+
+    def _toggle_item(self, index):
+        item = self.model().itemFromIndex(index)
+        if not item:
+            return
+        value = item.data(Qt.UserRole)
+        if value in self._required_values:
+            item.setData(Qt.Checked, Qt.CheckStateRole)
+            return
+        next_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+        item.setData(next_state, Qt.CheckStateRole)
+        self._refresh_text()
+        self.selection_changed.emit(self.checked_values())
+
+    def hidePopup(self):
+        self._refresh_text()
+        super().hidePopup()
+
+    def _refresh_text(self):
+        labels = []
+        for i in range(self.model().rowCount()):
+            item = self.model().item(i)
+            if item.data(Qt.CheckStateRole) == Qt.Checked:
+                labels.append(item.text())
+        self.lineEdit().setText(", ".join(labels))

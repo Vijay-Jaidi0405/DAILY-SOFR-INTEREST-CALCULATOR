@@ -18,7 +18,7 @@ METHODS    = ["Compounded in Arrears", "Simple Average in Arrears", "SOFR Index"
 RATE_TYPES = ["SOFR", "SOFR Index"]
 FREQS      = ["Monthly", "Quarterly"]
 YN         = ["N", "Y"]
-LOOKBACKS  = [2, 3, 5]
+LOOKBACKS  = [0, 1, 2, 5]
 ACCRUAL_BASES = ["Calendar Days", "Observation Period Days"]
 HOLIDAY_SET_OPTIONS = [("SIFMA", "SIFMA"), ("LONDON", "London"), ("TOKYO", "Tokyo")]
 

@@ -618,6 +618,8 @@ class CalcSinglePage(QWidget):
             "Simple Average in Arrears": "SUM(r_i × d_i) / SUM(d_i)",
             "SOFR Index":               "(Index_End / Index_Start − 1) × (DC / Accrual)",
         }.get(res["calculation_method"], "")
+        if res.get("daily_floor") is not None:
+            formula += f"  |  Daily Floor max(r_i, {float(res['daily_floor']):.4f}%)"
         if res.get("spread"):
             formula += f"  +  Spread ({res['spread']:.4f}%)"
 
@@ -793,9 +795,12 @@ class CalcSinglePage(QWidget):
 
         for i, row in enumerate(daily_rows):
             gf = row.get("is_good_friday", False)
+            floored = row.get("is_floored", False)
             bg = "#FFFDE7" if gf else ("#FFFFFF" if i % 2 == 0 else "#F8FAFC")
             gf_tag = (" <span style='color:#92400E; font-size:9px; "
                       "font-weight:700;'>GF</span>" if gf else "")
+            floor_tag = (" <span style='color:#B45309; font-size:9px; "
+                         "font-weight:700;'>FLOOR</span>" if floored else "")
 
             if method == "Compounded in Arrears":
                 c4 = str(row["day_weight"])
@@ -812,7 +817,7 @@ class CalcSinglePage(QWidget):
                 f"<td style='padding:7px 10px; font-family:monospace; font-size:12px;'>"
                 f"{fmt_date(row['date'])}</td>"
                 f"<td style='padding:7px 10px; font-family:monospace; font-size:12px; "
-                f"color:#1E40AF;'>{fmt_date(row['obs_date'])}{gf_tag}</td>"
+                f"color:#1E40AF;'>{fmt_date(row['obs_date'])}{gf_tag}{floor_tag}</td>"
                 f"<td style='padding:7px 10px; text-align:right; color:#065F46; "
                 f"font-weight:600;'>{row['sofr_rate']:.4f}%</td>"
                 f"<td style='padding:7px 10px; text-align:center;'>{c4}</td>"

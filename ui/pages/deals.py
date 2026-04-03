@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QDialog, QFormLayout, QDialogButtonBox,
     QMessageBox, QDoubleSpinBox, QSpinBox, QDateEdit, QScrollArea,
-    QSizePolicy, QFrame, QGroupBox
+    QSizePolicy, QFrame, QGroupBox, QCheckBox
 )
 from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtGui import QFont, QIntValidator
@@ -20,7 +20,12 @@ FREQS      = ["Monthly", "Quarterly"]
 YN         = ["N", "Y"]
 LOOKBACKS  = [0, 1, 2, 5]
 ACCRUAL_BASES = ["Calendar Days", "Observation Period Days"]
-HOLIDAY_SET_OPTIONS = [("SIFMA", "SIFMA"), ("LONDON", "London"), ("TOKYO", "Tokyo")]
+HOLIDAY_SET_OPTIONS = [
+    ("SIFMA", "SIFMA"),
+    ("US", "US Holidays"),
+    ("LONDON", "London"),
+    ("TOKYO", "Tokyo"),
+]
 
 
 def _divider():
@@ -96,12 +101,20 @@ class DealDialog(QDialog):
         self.f_spread.setDecimals(4)
         self.f_spread.setSingleStep(0.01)
         self.f_spread.setValue(0.0)
+        self.f_use_floor = QCheckBox("Enable Daily Floor")
+        self.f_daily_floor = QDoubleSpinBox()
+        self.f_daily_floor.setRange(-100.0, 100.0)
+        self.f_daily_floor.setDecimals(4)
+        self.f_daily_floor.setSingleStep(0.01)
+        self.f_daily_floor.setValue(0.0)
+        self.f_daily_floor.setEnabled(False)
 
         form1.addRow("Deal Name *",       self.f_deal_name)
         form1.addRow("Client Name *",     self.f_client)
         form1.addRow("CUSIP (9 chars) *", self.f_cusip)
         form1.addRow("Notional Amount *", self.f_notional)
         form1.addRow("Spread",            self.f_spread)
+        form1.addRow(self.f_use_floor,    self.f_daily_floor)
         body_lay.addLayout(form1)
         body_lay.addSpacing(16)
         body_lay.addWidget(_divider())
@@ -153,7 +166,7 @@ class DealDialog(QDialog):
             self.f_holiday_sets.add_check_item(label, value, checked=(value == "SIFMA"))
         self.f_holiday_sets.set_required_values(["SIFMA"])
         self.f_holiday_sets.setToolTip(
-            "SIFMA is always applied. Optionally add London or Tokyo holidays."
+            "SIFMA is always applied. Optionally add US, London, or Tokyo holidays."
         )
 
         # Payment delay days — only active when Pay Delay = Y
@@ -295,6 +308,7 @@ class DealDialog(QDialog):
         self.f_obs_shift.currentTextChanged.connect(self._on_obs_shift)
         self.f_method.currentTextChanged.connect(self._on_method_change)
         self.f_pay_delay.currentTextChanged.connect(self._on_pay_delay)
+        self.f_use_floor.toggled.connect(self._on_use_floor)
         self._on_rate_type(self.f_rate_type.currentText())
 
     # ── signal handlers ───────────────────────────────────────────────────────
@@ -319,6 +333,11 @@ class DealDialog(QDialog):
         else:
             self.f_frequency.setEnabled(True)
             self.f_frequency.setToolTip("")
+        allow_floor = method != "SOFR Index"
+        self.f_use_floor.setEnabled(allow_floor)
+        if not allow_floor:
+            self.f_use_floor.setChecked(False)
+        self._on_use_floor(self.f_use_floor.isChecked())
         self._refresh_preview()
 
     def _on_obs_shift(self, v):
@@ -331,6 +350,10 @@ class DealDialog(QDialog):
 
     def _on_pay_delay(self, v):
         self.f_delay_days.setEnabled(v == "Y")
+        self._refresh_preview()
+
+    def _on_use_floor(self, enabled):
+        self.f_daily_floor.setEnabled(enabled and self.f_use_floor.isEnabled())
         self._refresh_preview()
 
     # ── live preview ──────────────────────────────────────────────────────────
@@ -353,6 +376,11 @@ class DealDialog(QDialog):
             freq     = self.f_frequency.currentText()
             months   = 1 if freq == "Monthly" else 3
             holiday_calendar = self._selected_holiday_calendar()
+            floor_note = (
+                f"  ·  Daily floor {self.f_daily_floor.value():.4f}%"
+                if self.f_use_floor.isChecked() and self.f_use_floor.isEnabled()
+                else ""
+            )
 
             # Period 1:
             #   payment date  = first_payment_date (already given by user)
@@ -403,6 +431,7 @@ class DealDialog(QDialog):
                 + (f"  ·  Obs window shifted {lb}d back" if obs_sh else "")
                 + (f"  ·  Eff period shifted {lb}d back" if sh_int else "")
                 + f"  ·  Holidays: {holiday_calendar_label(holiday_calendar)}"
+                + floor_note
             )
 
         except Exception as e:
@@ -416,6 +445,9 @@ class DealDialog(QDialog):
         self.f_cusip.setText(d["cusip"])
         self.f_notional.setValue(d["notional_amount"])
         self.f_spread.setValue(float(d.get("spread") or 0.0))
+        daily_floor = d.get("daily_floor")
+        self.f_use_floor.setChecked(daily_floor is not None)
+        self.f_daily_floor.setValue(float(daily_floor or 0.0))
         self.f_rate_type.setCurrentText(d["rate_type"])
         self.f_frequency.setCurrentText(d["payment_frequency"])
         self.f_method.setCurrentText(d["calculation_method"])
@@ -471,7 +503,7 @@ class DealDialog(QDialog):
         holiday_values = self.f_holiday_sets.checked_values()
         optional_sets = [v for v in holiday_values if v != "SIFMA"]
         if len(optional_sets) > 1:
-            errs.append("Choose at most one optional holiday set: London or Tokyo")
+            errs.append("Choose at most one optional holiday set: US, London, or Tokyo")
         try:
             rounding_decimals = int(self.f_rounding.currentText())
             if not 0 <= rounding_decimals <= 12:
@@ -491,6 +523,10 @@ class DealDialog(QDialog):
             "cusip":              self.f_cusip.text().strip().upper(),
             "notional_amount":    self.f_notional.value(),
             "spread":             self.f_spread.value(),
+            "daily_floor":        (self.f_daily_floor.value()
+                                   if self.f_use_floor.isChecked()
+                                   and self.f_use_floor.isEnabled()
+                                   else None),
             "rate_type":          self.f_rate_type.currentText(),
             "payment_frequency":  self.f_frequency.currentText(),
             "calculation_method": self.f_method.currentText(),
@@ -576,7 +612,7 @@ class DealsPage(QWidget):
 
         # Table — note First Payment Date replaces Start Date
         cols = [
-            "CUSIP", "Deal Name", "Client", "Notional", "Spread",
+            "CUSIP", "Deal Name", "Client", "Notional", "Spread", "Daily Floor",
             "Rate Type", "Frequency", "Method",
             "Obs Shift", "SI", "Pay Delay", "Delay Days",
             "Accrual Basis", "Holiday Sets",
@@ -603,6 +639,7 @@ class DealsPage(QWidget):
                 d["client_name"],
                 fmt_money(d["notional_amount"]),
                 f"{float(d.get('spread') or 0):.4f}",
+                (f"{float(d['daily_floor']):.4f}" if d.get("daily_floor") is not None else "—"),
                 d["rate_type"],
                 d["payment_frequency"],
                 d["calculation_method"],

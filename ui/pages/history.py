@@ -150,3 +150,16 @@ class HistoryPage(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._load)
+
+    # Global search hook from MainWindow
+    def apply_search(self, term: str):
+        t = (term or "").lower().strip()
+        for r in range(self._tbl.rowCount()):
+            show = (not t)
+            if not show:
+                for c in range(self._tbl.columnCount()):
+                    item = self._tbl.item(r, c)
+                    if item and t in item.text().lower():
+                        show = True
+                        break
+            self._tbl.setRowHidden(r, not show)

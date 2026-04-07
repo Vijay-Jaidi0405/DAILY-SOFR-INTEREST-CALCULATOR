@@ -629,3 +629,7 @@ class RatesPage(QWidget):
         super().showEvent(event)
         QTimer.singleShot(0, self._load_summary)
         QTimer.singleShot(0, self._load_tables)
+
+    # Global search hook from MainWindow (no filtering needed here)
+    def apply_search(self, term: str):
+        pass

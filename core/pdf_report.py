@@ -419,8 +419,8 @@ def generate_calculation_pdf(result: dict,
                         _fmt_date(row.get("obs_date")),
                         _fmt_pct_value(row.get("sofr_rate")),
                         str(row.get("day_weight", "—")),
-                        f"{float(row.get('daily_factor', 0)):.8f}",
-                        f"{float(row.get('running_product', 0)):.8f}",
+                        f"{float(row.get('daily_factor', 0)):.12f}",
+                        f"{float(row.get('running_product', 0)):.12f}",
                     ]
                     for row in daily_rows
                 ]

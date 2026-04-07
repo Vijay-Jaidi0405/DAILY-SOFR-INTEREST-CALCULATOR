@@ -810,9 +810,9 @@ class CalcSinglePage(QWidget):
 
             if method == "Compounded in Arrears":
                 c4 = str(row["day_weight"])
-                c5 = f"{row['daily_factor']:.8f}"
+                c5 = f"{row['daily_factor']:.12f}"
                 c6 = (f"<span style='color:#4C3D9E; font-weight:700;'>"
-                      f"{row['running_product']:.8f}</span>")
+                      f"{row['running_product']:.12f}</span>")
             else:
                 c4 = str(row["day_weight"])
                 c5 = "Yes"
@@ -907,3 +907,15 @@ class CalcSinglePage(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._load_deals)
+
+    # Global search hook from MainWindow
+    def apply_search(self, term: str):
+        t = (term or "").lower().strip()
+        if not t:
+            return
+        for i in range(self._cusip_combo.count()):
+            data = self._cusip_combo.itemData(i)
+            txt  = self._cusip_combo.itemText(i).lower()
+            if data and (t in data.lower() or t in txt):
+                self._cusip_combo.setCurrentIndex(i)
+                break

@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QStackedWidget, QStatusBar,
-    QSizePolicy
+    QSizePolicy, QLineEdit, QScrollArea, QFrame
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QIcon
@@ -114,7 +114,33 @@ class MainWindow(QMainWindow):
         nav_lay.addWidget(version)
 
         root_lay.addWidget(nav)
-        root_lay.addWidget(self._stack, 1)
+
+        # Right side: search bar + scrollable content
+        right = QWidget()
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(6)
+
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(12, 8, 12, 0)
+        top_bar.setSpacing(10)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search CUSIP / Deal / Client across pages…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_global_search)
+        top_bar.addWidget(self._search)
+        right_lay.addLayout(top_bar)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        scroll.setWidget(self._stack)
+        right_lay.addWidget(scroll, 1)
+
+        root_lay.addWidget(right, 1)
 
         # Status bar
         bar = QStatusBar()
@@ -133,6 +159,13 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(idx)
         _, label, _, _ = NAV_ITEMS[idx]
         self._status.setText(f"{label}")
+        # Re-apply current search to the new page
+        self._apply_global_search(self._search.text())
 
     def status(self, msg: str):
         self._status.setText(msg)
+
+    def _apply_global_search(self, text: str):
+        page = self._stack.currentWidget()
+        if hasattr(page, "apply_search"):
+            page.apply_search(text or "")

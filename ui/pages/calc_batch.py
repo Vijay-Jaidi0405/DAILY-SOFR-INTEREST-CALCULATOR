@@ -326,3 +326,20 @@ class CalcBatchPage(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._load_cusips)
+
+    # Global search hook from MainWindow
+    def apply_search(self, term: str):
+        t = (term or "").lower().strip()
+        self._filter_table(self._tbl, t)
+
+    @staticmethod
+    def _filter_table(tbl, term: str):
+        for r in range(tbl.rowCount()):
+            show = (not term)
+            if not show:
+                for c in range(tbl.columnCount()):
+                    item = tbl.item(r, c)
+                    if item and term in item.text().lower():
+                        show = True
+                        break
+            tbl.setRowHidden(r, not show)

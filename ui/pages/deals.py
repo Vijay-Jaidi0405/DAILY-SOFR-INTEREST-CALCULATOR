@@ -12,6 +12,7 @@ from ui.widgets.common import (
     Panel, PageHeader, DataTable, fmt_money, fmt_date, make_date_item,
     CheckableComboBox
 )
+from core.database import DEFAULT_HOLIDAY_CALENDAR
 from ui.styles import GREEN, RED, ACCENT, BORDER
 
 METHODS    = ["Compounded in Arrears", "Simple Average in Arrears", "SOFR Index"]
@@ -21,6 +22,7 @@ YN         = ["N", "Y"]
 LOOKBACKS  = [0, 1, 2, 5]
 ACCRUAL_BASES = ["Calendar Days", "Observation Period Days"]
 HOLIDAY_SET_OPTIONS = [
+    ("ALL", "All Holidays"),
     ("SIFMA", "SIFMA"),
     ("US", "US Holidays"),
     ("LONDON", "London"),
@@ -163,10 +165,9 @@ class DealDialog(QDialog):
         self.f_accrual_basis = combo(ACCRUAL_BASES)
         self.f_holiday_sets = CheckableComboBox()
         for value, label in HOLIDAY_SET_OPTIONS:
-            self.f_holiday_sets.add_check_item(label, value, checked=(value == "SIFMA"))
-        self.f_holiday_sets.set_required_values(["SIFMA"])
+            self.f_holiday_sets.add_check_item(label, value, checked=(value == "ALL"))
         self.f_holiday_sets.setToolTip(
-            "SIFMA is always applied. Optionally add US, London, or Tokyo holidays."
+            "Select any combination of holiday lists, or choose All Holidays."
         )
 
         # Payment delay days — only active when Pay Delay = Y
@@ -458,7 +459,7 @@ class DealDialog(QDialog):
         self.f_accrual_basis.setCurrentText(
             d.get("accrual_day_basis") or "Calendar Days"
         )
-        holiday_values = str(d.get("holiday_calendar") or "SIFMA").split("|")
+        holiday_values = str(d.get("holiday_calendar") or DEFAULT_HOLIDAY_CALENDAR).split("|")
         self.f_holiday_sets.set_checked_values(holiday_values)
         self.f_rounding.setCurrentText(str(d["rounding_decimals"]))
         self.f_delay_days.setValue(int(d.get("payment_delay_days") or 0))
@@ -500,10 +501,7 @@ class DealDialog(QDialog):
         if (self.f_shifted_int.currentText() == "Y"
                 and self.f_obs_shift.currentText() == "N"):
             errs.append("Shifted Interest = Y requires Observation Shift = Y")
-        holiday_values = self.f_holiday_sets.checked_values()
-        optional_sets = [v for v in holiday_values if v != "SIFMA"]
-        if len(optional_sets) > 1:
-            errs.append("Choose at most one optional holiday set: US, London, or Tokyo")
+        # No limit; "ALL" is allowed to combine every list.
         try:
             rounding_decimals = int(self.f_rounding.currentText())
             if not 0 <= rounding_decimals <= 12:
@@ -546,8 +544,10 @@ class DealDialog(QDialog):
 
     def _selected_holiday_calendar(self) -> str:
         values = self.f_holiday_sets.checked_values()
-        if "SIFMA" not in values:
-            values.insert(0, "SIFMA")
+        if not values:
+            values = [DEFAULT_HOLIDAY_CALENDAR]
+        if "ALL" in values:
+            return "ALL"
         order = [value for value, _ in HOLIDAY_SET_OPTIONS]
         selected = [value for value in order if value in values]
         return "|".join(selected)
@@ -758,6 +758,10 @@ class DealsPage(QWidget):
                 f"Payment schedule generated for {cusip}.")
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
+
+    # Global search hook from MainWindow
+    def apply_search(self, term: str):
+        self._search.setText(term)
 
     def showEvent(self, event):
         super().showEvent(event)

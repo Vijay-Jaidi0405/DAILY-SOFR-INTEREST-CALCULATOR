@@ -407,6 +407,9 @@ def _holiday_dates_for_codes(codes) -> set[date]:
 
 
 def _is_business_day_in_set(d: date, holiday_dates: set[date]) -> bool:
+    # Treat Good Friday as a business day even if present in holiday sets.
+    if _is_good_friday(d):
+        return d.weekday() < 5
     return d.weekday() < 5 and d not in holiday_dates
 
 

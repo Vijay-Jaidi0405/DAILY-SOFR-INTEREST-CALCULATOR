@@ -333,7 +333,7 @@ class CalcSinglePage(QWidget):
         # KPI row 2
         kpi2 = QHBoxLayout(); kpi2.setSpacing(12)
         self._k_int   = KpiCard("Interest Amount",    "—", color=GREEN)
-        self._k_days  = KpiCard("Accrual Days",       "—")
+        self._k_days  = KpiCard("Interest Days",      "—")
         self._k_pay   = KpiCard("Adj Payment Date",   "—", color=AMBER)
         kpi2.addWidget(self._k_int)
         kpi2.addWidget(self._k_days)
@@ -606,7 +606,7 @@ class CalcSinglePage(QWidget):
         self._k_ann.set_value(fmt_rate(res["annualized_rate"]),        ACCENT)
         self._k_round.set_value(fmt_rate(res["rounded_rate"],   rnd),  PURPLE)
         self._k_int.set_value(fmt_money(res["interest_amount"]),       GREEN)
-        self._k_days.set_value(str(res["accrual_days"]))
+        self._k_days.set_value(str(res.get("interest_period_days", "—")))
         self._k_pay.set_value(fmt_date(res["adjusted_payment_date"]),  AMBER)
 
         delay_note = (
@@ -616,12 +616,15 @@ class CalcSinglePage(QWidget):
         formula = {
             "Compounded in Arrears":     "PRODUCT(1 + r_i × d_i / DC) − 1",
             "Simple Average in Arrears": "SUM(r_i × d_i) / SUM(d_i)",
-            "SOFR Index":               "(Index_End / Index_Start − 1) × (DC / Accrual)",
+            "SOFR Index":               "(Index_End / Index_Start − 1) × (DC / Selected Basis Days)",
         }.get(res["calculation_method"], "")
         if res.get("daily_floor") is not None:
             formula += f"  |  Daily Floor max(r_i, {float(res['daily_floor']):.4f}%)"
         if res.get("spread"):
-            formula += f"  +  Spread ({res['spread']:.4f}%)"
+            formula += (
+                f"  |  All-in Annualized = Benchmark Annualized + Spread"
+                f" ({res['spread']:.4f}%)"
+            )
 
         html = f"""
 <div style='font-family:Segoe UI,Arial,sans-serif; font-size:13px; padding:16px;'>
@@ -692,14 +695,14 @@ class CalcSinglePage(QWidget):
   <tr>
     <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Interest Period Days</td>
     <td style='padding:10px 14px; font-weight:600;'>{res.get('interest_period_days', res['accrual_days'])}</td>
-    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Accrual Days Used</td>
-    <td style='padding:10px 14px; font-weight:600;'>{res['accrual_days']}</td>
+    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Stored Basis</td>
+    <td style='padding:10px 14px; font-weight:600;'>{res.get('accrual_day_basis', 'Calendar Days')}</td>
   </tr>
   <tr style='background:#F1F5F9;'>
     <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Observation Period Days</td>
     <td style='padding:10px 14px; font-weight:600;'>{res.get('observation_period_days', '—')}</td>
-    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Stored Basis</td>
-    <td style='padding:10px 14px; font-weight:600;'>{res.get('accrual_day_basis', 'Calendar Days')}</td>
+    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'></td>
+    <td style='padding:10px 14px; font-weight:600;'></td>
   </tr>
 </table>
 

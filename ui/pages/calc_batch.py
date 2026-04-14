@@ -166,7 +166,7 @@ class CalcBatchPage(QWidget):
         res_panel = Panel("Batch Results")
         cols = [
             "CUSIP", "Deal Name", "Client", "Method",
-            "Accrual Days", "Comp/Avg Rate", "Ann Rate",
+            "Comp/Avg Rate", "Ann Rate",
             "Interest Amount", "Payment Date", "Status"
         ]
         self._tbl = DataTable(cols)
@@ -266,7 +266,6 @@ class CalcBatchPage(QWidget):
                 r.get("deal_name", "—"),
                 r.get("client_name", "—"),
                 r.get("calculation_method", "—"),
-                str(r.get("accrual_days", "—")),
                 fmt_rate(r.get("compounded_rate")),
                 fmt_rate(r.get("annualized_rate")),
                 fmt_money(r.get("interest_amount")),

@@ -93,7 +93,7 @@ class SchedulePage(QWidget):
         panel = Panel("Period Schedule")
         cols = [
             "#", "Period Start", "Period End (Excl.)", "Obs Start", "Obs End (Excl.)",
-            "Payment Date", "Days", "Status",
+            "Payment Date", "Status",
             "Comp/Avg Rate", "Annualized Rate", "Interest", "Running Total"
         ]
         self._tbl = DataTable(cols)
@@ -162,7 +162,6 @@ class SchedulePage(QWidget):
                 make_date_item(r["obs_start_date"]),
                 make_date_item(r["obs_end_date"]),
                 make_date_item(r["adj_payment_date"]),
-                str(r["accrual_days"]),
                 r["period_status"],
                 fmt_rate(r.get("compounded_rate")),
                 fmt_rate(r.get("annualized_rate")),

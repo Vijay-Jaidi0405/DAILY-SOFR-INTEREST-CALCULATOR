@@ -247,6 +247,8 @@ def generate_calculation_pdf(result: dict,
          "Deal Name",    result.get("deal_name","—")],
         ["Client",       result.get("client_name","—"),
          "Rate Type",    result.get("rate_type","—")],
+        ["Issue Date",   _fmt_date(result.get("issue_date")),
+         "First Pay",    _fmt_date(result.get("first_payment_date"))],
         ["Notional",     _fmt_money(result.get("notional_amount")),
          "Frequency",    result.get("payment_frequency","—")],
         ["Spread",       f"{float(result.get('spread', 0) or 0):.4f}%",
@@ -256,7 +258,9 @@ def generate_calculation_pdf(result: dict,
         ["Shifted Int",  result.get("shifted_interest","—"),
          "Look Back",    f"{result.get('look_back_days','—')}d"],
         ["Stored Basis", result.get("accrual_day_basis","Calendar Days"),
-         "Accrual Days Used",  str(result.get("accrual_days","—"))],
+         "Rounded Rate",  _fmt_rate(result.get("rounded_rate"), rnd)],
+        ["Rate Holidays", result.get("rate_holiday_calendar_label", "—"),
+         "Period Holidays", result.get("period_holiday_calendar_label", "—")],
         ["Pay Delay",    result.get("payment_delay_flag", "—"),
          "Rounding",     f"{rnd} decimals"],
     ]
@@ -285,7 +289,7 @@ def generate_calculation_pdf(result: dict,
          "Obs End (shifted)", _fmt_date(result.get("obs_end_date"))],
         ["Interest Period Days", str(result.get("interest_period_days", result.get("accrual_days","—"))),
          "Observation Period Days", str(result.get("observation_period_days","—"))],
-        ["Accrual Days Used", str(result.get("accrual_days","—")),
+        ["Stored Basis", str(result.get("accrual_day_basis","Calendar Days")),
          "Day Count",         f"ACT/{result.get('day_count_basis', 360)}"],
         ["Payment Date",      _fmt_date(result.get("payment_date")),
          "Adj Payment Date",  _fmt_date(result.get("adjusted_payment_date"))],
@@ -363,12 +367,15 @@ def generate_calculation_pdf(result: dict,
             "Formula: SUM(r_i x d_i) / SUM(d_i)  |  "
             "Weighted daily average of SOFR over observation period",
         "SOFR Index":
-            "Formula: (Index_End / Index_Start - 1) x (DC / Accrual Days)  |  "
+            "Formula: (Index_End / Index_Start - 1) x (DC / Selected Basis Days)  |  "
             "SOFR Index ratio at shifted observation dates",
     }
     formula = formula_map.get(method, "")
     if result.get("spread"):
-        formula += f"  |  Spread added to annualized rate: {float(result.get('spread') or 0):.4f}%"
+        formula += (
+            "  |  All-in Annualized Rate = Benchmark Annualized Rate + Spread Rate"
+            f" ({float(result.get('spread') or 0):.4f}%)"
+        )
     if formula:
         formula_tbl = Table(
             [[Paragraph(formula, s_mono)]],
@@ -585,7 +592,7 @@ def generate_batch_pdf(results: list[dict],
 
     # Results table
     headers = ["CUSIP","Deal Name","Client","Method",
-               "Accrual\nDays","Comp/Avg\nRate","Ann Rate",
+               "Comp/Avg\nRate","Ann Rate",
                "Interest Amount","Adj Pay Date","Status"]
     cw = [W*0.07, W*0.16, W*0.10, W*0.14,
           W*0.05, W*0.08, W*0.08,
@@ -601,7 +608,6 @@ def generate_batch_pdf(results: list[dict],
             Paragraph(r.get("deal_name","")[:28], s_cell),
             Paragraph(r.get("client_name","")[:18], s_cell),
             Paragraph(r.get("calculation_method","")[:22], s_cell),
-            Paragraph(str(r.get("accrual_days","—")), s_cell),
             Paragraph(_fmt_rate(r.get("compounded_rate"), 7), s_cell),
             Paragraph(_fmt_rate(r.get("annualized_rate"), 7), s_cell),
             Paragraph(_fmt_money(r.get("interest_amount")), s_cell),

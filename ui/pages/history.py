@@ -81,7 +81,7 @@ class HistoryPage(QWidget):
             "Log ID", "CUSIP", "Deal Name", "Client", "Method",
             "Period Start", "Period End",
             "Obs Start", "Obs End",
-            "Accrual Days", "Day Count",
+            "Day Count",
             "Comp Rate", "Ann Rate", "Rounded Rate",
             "Interest Amount", "Pay Date", "Adj Pay Date",
             "Batch ID", "Calculated At"
@@ -127,7 +127,6 @@ class HistoryPage(QWidget):
                 make_date_item(r["period_end_date"]),
                 make_date_item(r.get("obs_start_date")),
                 make_date_item(r.get("obs_end_date")),
-                str(r["accrual_days"]),
                 str(r["day_count_basis"]),
                 fmt_rate(r.get("compounded_rate")),
                 fmt_rate(r.get("annualized_rate")),

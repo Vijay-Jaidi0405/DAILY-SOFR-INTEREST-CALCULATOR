@@ -14,6 +14,8 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent / "sofr_calculator.db"
 
 DEFAULT_HOLIDAY_CALENDAR = "ALL"
+DEFAULT_RATE_HOLIDAY_CALENDAR = DEFAULT_HOLIDAY_CALENDAR
+DEFAULT_PERIOD_HOLIDAY_CALENDAR = DEFAULT_HOLIDAY_CALENDAR
 HOLIDAY_CALENDAR_OPTIONS = [
     ("ALL", "All Holidays"),
     ("SIFMA", "SIFMA"),
@@ -56,6 +58,22 @@ def holiday_calendar_label(value) -> str:
     return " + ".join(
         HOLIDAY_CALENDAR_LABELS.get(code, code)
         for code in codes
+    )
+
+
+def deal_rate_holiday_calendar(deal: dict) -> str:
+    return normalize_holiday_calendar(
+        deal.get("rate_holiday_calendar")
+        or deal.get("holiday_calendar")
+        or DEFAULT_RATE_HOLIDAY_CALENDAR
+    )
+
+
+def deal_period_holiday_calendar(deal: dict) -> str:
+    return normalize_holiday_calendar(
+        deal.get("period_holiday_calendar")
+        or deal.get("holiday_calendar")
+        or DEFAULT_PERIOD_HOLIDAY_CALENDAR
     )
 
 
@@ -220,12 +238,15 @@ CREATE TABLE IF NOT EXISTS deal_master (
     shifted_interest    TEXT    NOT NULL DEFAULT 'N' CHECK(shifted_interest IN ('Y','N')),
     payment_delay       TEXT    NOT NULL DEFAULT 'N' CHECK(payment_delay IN ('Y','N')),
     holiday_calendar    TEXT    NOT NULL DEFAULT 'ALL',
+    rate_holiday_calendar   TEXT    NOT NULL DEFAULT 'ALL',
+    period_holiday_calendar TEXT    NOT NULL DEFAULT 'ALL',
     rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals BETWEEN 0 AND 12),
     look_back_days      INTEGER NOT NULL DEFAULT 2,
     calculation_method  TEXT    NOT NULL CHECK(calculation_method IN (
                             'Compounded in Arrears',
                             'Simple Average in Arrears',
                             'SOFR Index')),
+    issue_date          TEXT    NOT NULL,
     first_payment_date  TEXT    NOT NULL,
     maturity_date       TEXT    NOT NULL,
     payment_delay_days  INTEGER NOT NULL DEFAULT 0,
@@ -460,6 +481,39 @@ def init_db():
         except Exception:
             pass
         try:
+            conn.execute(
+                "ALTER TABLE deal_master ADD COLUMN rate_holiday_calendar "
+                "TEXT NOT NULL DEFAULT 'ALL'"
+            )
+            conn.execute("""
+                UPDATE deal_master
+                SET rate_holiday_calendar = COALESCE(holiday_calendar, 'ALL')
+                WHERE rate_holiday_calendar IS NULL OR rate_holiday_calendar = ''
+            """)
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                "ALTER TABLE deal_master ADD COLUMN period_holiday_calendar "
+                "TEXT NOT NULL DEFAULT 'ALL'"
+            )
+            conn.execute("""
+                UPDATE deal_master
+                SET period_holiday_calendar = COALESCE(holiday_calendar, 'ALL')
+                WHERE period_holiday_calendar IS NULL OR period_holiday_calendar = ''
+            """)
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE deal_master ADD COLUMN issue_date TEXT")
+            conn.execute("""
+                UPDATE deal_master
+                SET issue_date = COALESCE(issue_date, first_payment_date)
+                WHERE issue_date IS NULL OR issue_date = ''
+            """)
+        except Exception:
+            pass
+        try:
             row = conn.execute("""
                 SELECT sql
                 FROM sqlite_master
@@ -486,12 +540,15 @@ def init_db():
                         shifted_interest    TEXT    NOT NULL DEFAULT 'N' CHECK(shifted_interest IN ('Y','N')),
                         payment_delay       TEXT    NOT NULL DEFAULT 'N' CHECK(payment_delay IN ('Y','N')),
                         holiday_calendar    TEXT    NOT NULL DEFAULT 'ALL',
+                        rate_holiday_calendar   TEXT    NOT NULL DEFAULT 'ALL',
+                        period_holiday_calendar TEXT    NOT NULL DEFAULT 'ALL',
                         rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals BETWEEN 0 AND 12),
                         look_back_days      INTEGER NOT NULL DEFAULT 2,
                         calculation_method  TEXT    NOT NULL CHECK(calculation_method IN (
                                                 'Compounded in Arrears',
                                                 'Simple Average in Arrears',
                                                 'SOFR Index')),
+                        issue_date          TEXT    NOT NULL,
                         first_payment_date  TEXT    NOT NULL,
                         maturity_date       TEXT    NOT NULL,
                         payment_delay_days  INTEGER NOT NULL DEFAULT 0,
@@ -507,17 +564,20 @@ def init_db():
                         deal_id, deal_name, client_name, cusip, notional_amount,
                         spread, daily_floor, accrual_day_basis, rate_type, payment_frequency,
                         observation_shift, shifted_interest, payment_delay, holiday_calendar,
+                        rate_holiday_calendar, period_holiday_calendar,
                         rounding_decimals, look_back_days, calculation_method,
-                        first_payment_date, maturity_date, payment_delay_days,
+                        issue_date, first_payment_date, maturity_date, payment_delay_days,
                         status, created_at, modified_at
                     )
                     SELECT
                         deal_id, deal_name, client_name, cusip, notional_amount,
                         spread, daily_floor, accrual_day_basis, rate_type, payment_frequency,
                         observation_shift, shifted_interest, payment_delay,
-                        COALESCE(holiday_calendar, 'SIFMA'),
+                        COALESCE(holiday_calendar, 'ALL'),
+                        COALESCE(holiday_calendar, 'ALL'),
+                        COALESCE(holiday_calendar, 'ALL'),
                         rounding_decimals, look_back_days, calculation_method,
-                        first_payment_date, maturity_date, payment_delay_days,
+                        first_payment_date, first_payment_date, maturity_date, payment_delay_days,
                         status, created_at, modified_at
                     FROM deal_master_old;
                     DROP TABLE deal_master_old;
@@ -804,6 +864,12 @@ def _observation_period_days(obs_start: date, obs_end: date) -> int:
     return _accrual_days(obs_start, obs_end)
 
 
+def _selected_accrual_days(deal: dict, interest_days: int, observation_days: int) -> int:
+    if deal.get("shifted_interest") == "Y":
+        return interest_days
+    return observation_days
+
+
 def _iter_business_days(start: date, end: date,
                         holiday_calendar=DEFAULT_HOLIDAY_CALENDAR):
     """Yield (calendar_date, day_weight) for each business day in [start, end)."""
@@ -832,7 +898,8 @@ def _natural_business_day_weight(d: date,
 
 def _aligned_business_days(interest_start: date, interest_end: date,
                            obs_start: date, obs_end: date,
-                           holiday_calendar=DEFAULT_HOLIDAY_CALENDAR,
+                           interest_holiday_calendar=DEFAULT_PERIOD_HOLIDAY_CALENDAR,
+                           observation_holiday_calendar=DEFAULT_RATE_HOLIDAY_CALENDAR,
                            use_observation_shift: bool = False):
     """
     Return aligned tuples of (interest_date, obs_date, day_weight).
@@ -844,13 +911,13 @@ def _aligned_business_days(interest_start: date, interest_end: date,
     observation period, while interest dates remain the dates in the interest period.
     """
     interest_days = list(_iter_business_days(
-        interest_start, interest_end, holiday_calendar=holiday_calendar
+        interest_start, interest_end, holiday_calendar=interest_holiday_calendar
     ))
     if not use_observation_shift:
         return interest_days
 
     observation_days = list(_iter_business_days(
-        obs_start, obs_end, holiday_calendar=holiday_calendar
+        obs_start, obs_end, holiday_calendar=observation_holiday_calendar
     ))
     if len(interest_days) != len(observation_days):
         raise ValueError(
@@ -862,7 +929,7 @@ def _aligned_business_days(interest_start: date, interest_end: date,
             observation_days[i][0],
             _natural_business_day_weight(
                 observation_days[i][0],
-                holiday_calendar=holiday_calendar
+                holiday_calendar=observation_holiday_calendar
             )
         )
         for i in range(len(interest_days))
@@ -1003,12 +1070,13 @@ def _check_obs_rates_available(conn, obs_start: date, obs_end: date,
 def _calc_compounded(conn, deal: dict, p_start: date, p_end: date,
                      dc: int = 360):
     lb = deal["look_back_days"]
-    holiday_calendar = deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
+    rate_holiday_calendar = deal_rate_holiday_calendar(deal)
+    period_holiday_calendar = deal_period_holiday_calendar(deal)
     use_obs_shift = deal.get("observation_shift") == "Y"
     shifted_int = deal["shifted_interest"] == "Y"
     if shifted_int:
-        eff_start = _shift_business_days_back(p_start, lb, holiday_calendar=holiday_calendar)
-        eff_end   = _shift_business_days_back(p_end,   lb, holiday_calendar=holiday_calendar)
+        eff_start = _shift_business_days_back(p_start, lb, holiday_calendar=rate_holiday_calendar)
+        eff_end   = _shift_business_days_back(p_end,   lb, holiday_calendar=rate_holiday_calendar)
     else:
         eff_start, eff_end = p_start, p_end
 
@@ -1016,24 +1084,25 @@ def _calc_compounded(conn, deal: dict, p_start: date, p_end: date,
     if shifted_int:
         obs_start, obs_end = eff_start, eff_end
     else:
-        obs_start = _shift_business_days_back(eff_start, lb, holiday_calendar=holiday_calendar)
-        obs_end   = _shift_business_days_back(eff_end,   lb, holiday_calendar=holiday_calendar)
+        obs_start = _shift_business_days_back(eff_start, lb, holiday_calendar=rate_holiday_calendar)
+        obs_end   = _shift_business_days_back(eff_end,   lb, holiday_calendar=rate_holiday_calendar)
     interest_days = _interest_period_days(p_start, p_end)
     observation_days = _observation_period_days(obs_start, obs_end)
-    accrual   = interest_days
+    accrual   = _selected_accrual_days(deal, interest_days, observation_days)
 
     product    = 1.0
     daily_rows = []
 
     for row_info in _aligned_business_days(
             eff_start, eff_end, obs_start, obs_end,
-            holiday_calendar=holiday_calendar,
+            interest_holiday_calendar=period_holiday_calendar,
+            observation_holiday_calendar=rate_holiday_calendar,
             use_observation_shift=use_obs_shift):
         if use_obs_shift:
             cal_date, obs_date, wt = row_info
         else:
             cal_date, wt = row_info
-            obs_date = _shift_business_days_back(cal_date, lb, holiday_calendar=holiday_calendar)
+            obs_date = _shift_business_days_back(cal_date, lb, holiday_calendar=rate_holiday_calendar)
         is_gf     = _is_good_friday(obs_date)
         row       = _get_rate(conn, obs_date)
         if row:
@@ -1063,30 +1132,32 @@ def _calc_compounded(conn, deal: dict, p_start: date, p_end: date,
 def _calc_simple_average(conn, deal: dict, p_start: date, p_end: date,
                          dc: int = 360):
     lb        = deal["look_back_days"]
-    holiday_calendar = deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
+    rate_holiday_calendar = deal_rate_holiday_calendar(deal)
+    period_holiday_calendar = deal_period_holiday_calendar(deal)
     use_obs_shift = deal.get("observation_shift") == "Y"
     shifted_int = deal.get("shifted_interest") == "Y"
     if shifted_int:
         obs_start, obs_end = p_start, p_end
     else:
-        obs_start = _shift_business_days_back(p_start, lb, holiday_calendar=holiday_calendar)
-        obs_end   = _shift_business_days_back(p_end,   lb, holiday_calendar=holiday_calendar)
+        obs_start = _shift_business_days_back(p_start, lb, holiday_calendar=rate_holiday_calendar)
+        obs_end   = _shift_business_days_back(p_end,   lb, holiday_calendar=rate_holiday_calendar)
     interest_days = _interest_period_days(p_start, p_end)
     observation_days = _observation_period_days(obs_start, obs_end)
-    accrual   = interest_days
+    accrual   = _selected_accrual_days(deal, interest_days, observation_days)
 
     sum_w, sum_d = 0.0, 0
     daily_rows   = []
 
     for row_info in _aligned_business_days(
             p_start, p_end, obs_start, obs_end,
-            holiday_calendar=holiday_calendar,
+            interest_holiday_calendar=period_holiday_calendar,
+            observation_holiday_calendar=rate_holiday_calendar,
             use_observation_shift=use_obs_shift):
         if use_obs_shift:
             cal_date, obs_date, wt = row_info
         else:
             cal_date, wt = row_info
-            obs_date = _shift_business_days_back(cal_date, lb, holiday_calendar=holiday_calendar)
+            obs_date = _shift_business_days_back(cal_date, lb, holiday_calendar=rate_holiday_calendar)
         is_gf    = _is_good_friday(obs_date)
         row      = _get_rate(conn, obs_date)
         if row:
@@ -1135,11 +1206,11 @@ def _calc_index(conn, deal: dict, p_start: date, p_end: date,
     the index is looked up look_back_days BEFORE the period boundary.
     """
     lb = deal["look_back_days"]
-    holiday_calendar = deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
+    rate_holiday_calendar = deal_rate_holiday_calendar(deal)
 
     # Observation dates: period boundaries shifted back by business-day lookback
-    obs_start_raw = _shift_business_days_back(p_start, lb, holiday_calendar=holiday_calendar)
-    obs_end_raw   = _shift_business_days_back(p_end,   lb, holiday_calendar=holiday_calendar)
+    obs_start_raw = _shift_business_days_back(p_start, lb, holiday_calendar=rate_holiday_calendar)
+    obs_end_raw   = _shift_business_days_back(p_end,   lb, holiday_calendar=rate_holiday_calendar)
 
     # Find nearest published index dates on or before each obs date
     obs_start_d = _nearest_index_date(conn, obs_start_raw)
@@ -1189,7 +1260,7 @@ def _calc_index(conn, deal: dict, p_start: date, p_end: date,
     # Accrual days may be based on period dates or observation dates per deal setup.
     interest_days = _interest_period_days(p_start, p_end)
     observation_days = _observation_period_days(obs_start_d, obs_end_d)
-    accrual = interest_days
+    accrual = _selected_accrual_days(deal, interest_days, observation_days)
 
     if accrual <= 0:
         raise ValueError(
@@ -1238,6 +1309,10 @@ def _apply_spread(deal: dict, period_rate: float, annual_rate: float,
     """
     Apply spread as an annualized percentage margin.
 
+    All-in annualized rate = benchmark_annualized_rate + spread_rate.
+    The same spread is prorated across the accrual period to produce the
+    all-in period rate used for interest amount.
+
     Example: spread=1.25 means 1.25%, so 0.0125 is added to the annualized
     benchmark rate and prorated across the accrual period for interest.
     """
@@ -1277,11 +1352,15 @@ def _calculate_interest_for_deal(conn, deal: dict, cusip: str,
     raw_pay      = payment_date + timedelta(days=actual_delay)
     adj_pay      = _next_business_day(
         conn, raw_pay,
-        holiday_calendar=deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
+        holiday_calendar=deal_period_holiday_calendar(deal)
     )
     rounded_rate = round(all_in_annual_rate, 7)
     result_rounding_decimals = 7
-    ia = deal["notional_amount"] * rounded_rate * (acc / dc) if acc else 0.0
+    period_days_for_interest = interest_period_days if interest_period_days is not None else acc
+    ia = (
+        deal["notional_amount"] * rounded_rate * (period_days_for_interest / dc)
+        if period_days_for_interest else 0.0
+    )
 
     result = {
         "cusip":               cusip,
@@ -1300,6 +1379,8 @@ def _calculate_interest_for_deal(conn, deal: dict, cusip: str,
         "payment_delay_flag":  deal["payment_delay"],
         "look_back_days":      deal["look_back_days"],
         "rounding_decimals":   result_rounding_decimals,
+        "issue_date":          deal.get("issue_date"),
+        "first_payment_date":  deal.get("first_payment_date") or deal.get("start_date"),
         "period_start_date":   p_start,
         "period_end_date":     p_end,
         "obs_start_date":      obs_s,
@@ -1318,6 +1399,10 @@ def _calculate_interest_for_deal(conn, deal: dict, cusip: str,
         "payment_date":        payment_date,
         "adjusted_payment_date": adj_pay,
         "payment_delay_days":  actual_delay,
+        "rate_holiday_calendar": deal_rate_holiday_calendar(deal),
+        "period_holiday_calendar": deal_period_holiday_calendar(deal),
+        "rate_holiday_calendar_label": holiday_calendar_label(deal_rate_holiday_calendar(deal)),
+        "period_holiday_calendar_label": holiday_calendar_label(deal_period_holiday_calendar(deal)),
         "daily_rows":          daily_rows,      # breakdown table
         "index_start":         index_start,     # SOFR Index only
         "index_end":           index_end,       # SOFR Index only
@@ -1482,7 +1567,8 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
     lb      = deal["look_back_days"]
     delay   = int(deal.get("payment_delay_days") or 0) if deal["payment_delay"] == "Y" else 0
     si      = deal["shifted_interest"] == "Y"
-    holiday_calendar = deal.get("holiday_calendar", DEFAULT_HOLIDAY_CALENDAR)
+    rate_holiday_calendar = deal_rate_holiday_calendar(deal)
+    period_holiday_calendar = deal_period_holiday_calendar(deal)
     # first_payment_date is the anchor for all period calculations
     fpd     = date.fromisoformat(
                   deal.get("first_payment_date") or deal.get("start_date")
@@ -1492,7 +1578,7 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
     # Pass first_payment_date and delay into _gen_periods
     periods  = _gen_periods(fpd, d_mat, deal["payment_frequency"],
                             delay_days=delay,
-                            holiday_calendar=holiday_calendar)
+                            holiday_calendar=period_holiday_calendar)
     is_index = deal["calculation_method"] == "SOFR Index"
     rows = []
     for num, ps, pe, pay_date in periods:
@@ -1502,15 +1588,15 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
 
         # Shifted-interest: effective accrual period shifted back by lookback
         if si:
-            eff_ps = _shift_business_days_back(ps, lb, holiday_calendar=holiday_calendar)
-            eff_pe = _shift_business_days_back(pe, lb, holiday_calendar=holiday_calendar)
+            eff_ps = _shift_business_days_back(ps, lb, holiday_calendar=rate_holiday_calendar)
+            eff_pe = _shift_business_days_back(pe, lb, holiday_calendar=rate_holiday_calendar)
         else:
             eff_ps = ps
             eff_pe = pe
 
         # Observation window = effective dates shifted back by lookback.
-        obs_s = _shift_business_days_back(eff_ps, lb, holiday_calendar=holiday_calendar)
-        obs_e = _shift_business_days_back(eff_pe, lb, holiday_calendar=holiday_calendar)
+        obs_s = _shift_business_days_back(eff_ps, lb, holiday_calendar=rate_holiday_calendar)
+        obs_e = _shift_business_days_back(eff_pe, lb, holiday_calendar=rate_holiday_calendar)
 
         acc   = _interest_period_days(ps, pe)
         unadj = pay_date   # payment date already adjusted in _gen_periods
@@ -1520,11 +1606,11 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
         #   SOFR Index            -> obs_end_date
         #   Compounded/Simple Avg -> next bday after obs_end_date
         if is_index:
-            rdd = _nearest_next_bday(obs_e, holiday_calendar=holiday_calendar)
+            rdd = _nearest_next_bday(obs_e, holiday_calendar=period_holiday_calendar)
         else:
             rdd = _nearest_next_bday(
                 obs_e + timedelta(days=1),
-                holiday_calendar=holiday_calendar
+                holiday_calendar=period_holiday_calendar
             )
 
         rows.append((
@@ -1610,7 +1696,7 @@ def refresh_schedule_status(conn, cusip: str | None = None):
     args  = (cusip,) if cusip else ()
 
     rows = conn.execute(
-        f"""SELECT ps.*, d.calculation_method, d.holiday_calendar
+        f"""SELECT ps.*, d.calculation_method, d.rate_holiday_calendar
             FROM payment_schedule ps
             JOIN deal_master d ON d.deal_id = ps.deal_id
             WHERE ps.period_status != 'Calculated' {where}""",
@@ -1622,7 +1708,7 @@ def refresh_schedule_status(conn, cusip: str | None = None):
         obs_e    = date.fromisoformat(row["obs_end_date"])
         eff_e    = date.fromisoformat(row["eff_period_end_date"])
         is_index = row["calculation_method"] == "SOFR Index"
-        holiday_calendar = row["holiday_calendar"] or DEFAULT_HOLIDAY_CALENDAR
+        holiday_calendar = row["rate_holiday_calendar"] or DEFAULT_RATE_HOLIDAY_CALENDAR
 
         ended    = eff_e <= today
         rates_ok = _check_obs_rates_available(
@@ -1790,17 +1876,20 @@ def get_deal(conn, cusip: str):
 
 def insert_deal(conn, d: dict):
     d = enforce_frequency(d)
-    holiday_calendar = normalize_holiday_calendar(d.get("holiday_calendar"))
+    rate_holiday_calendar = normalize_holiday_calendar(d.get("rate_holiday_calendar"))
+    period_holiday_calendar = normalize_holiday_calendar(d.get("period_holiday_calendar"))
+    holiday_calendar = period_holiday_calendar
     # Support both old start_date and new first_payment_date key names
     fpd = d.get("first_payment_date") or d.get("start_date")
     conn.execute("""
         INSERT INTO deal_master(
             deal_name, client_name, cusip, notional_amount, spread, daily_floor, accrual_day_basis,
             rate_type, payment_frequency, observation_shift,
-            shifted_interest, payment_delay, holiday_calendar, payment_delay_days,
+            shifted_interest, payment_delay, holiday_calendar, rate_holiday_calendar,
+            period_holiday_calendar, payment_delay_days,
             rounding_decimals, look_back_days, calculation_method,
-            first_payment_date, maturity_date, status
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            issue_date, first_payment_date, maturity_date, status
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         d["deal_name"], d["client_name"], d["cusip"], d["notional_amount"],
         float(d.get("spread") or 0),
@@ -1808,18 +1897,21 @@ def insert_deal(conn, d: dict):
         d.get("accrual_day_basis", "Calendar Days"),
         d["rate_type"], d["payment_frequency"], d["observation_shift"],
         d["shifted_interest"], d["payment_delay"], holiday_calendar,
+        rate_holiday_calendar, period_holiday_calendar,
         int(d.get("payment_delay_days") or 0),
         d["rounding_decimals"], d["look_back_days"], d["calculation_method"],
-        fpd, d["maturity_date"], d.get("status", "Active")
+        d["issue_date"], fpd, d["maturity_date"], d.get("status", "Active")
     ))
 
 
 def update_deal(conn, cusip: str, d: dict):
     d = enforce_frequency(d)
-    holiday_calendar = normalize_holiday_calendar(d.get("holiday_calendar"))
+    rate_holiday_calendar = normalize_holiday_calendar(d.get("rate_holiday_calendar"))
+    period_holiday_calendar = normalize_holiday_calendar(d.get("period_holiday_calendar"))
+    holiday_calendar = period_holiday_calendar
     fpd = d.get("first_payment_date") or d.get("start_date")
     existing = conn.execute(
-        "SELECT spread, daily_floor, accrual_day_basis, holiday_calendar FROM deal_master WHERE cusip=?",
+        "SELECT spread, daily_floor, accrual_day_basis, holiday_calendar, rate_holiday_calendar, period_holiday_calendar FROM deal_master WHERE cusip=?",
         (cusip,)
     ).fetchone()
     old_spread = float(existing["spread"] or 0) if existing else 0.0
@@ -1832,13 +1924,22 @@ def update_deal(conn, cusip: str, d: dict):
         existing["holiday_calendar"] if existing and existing["holiday_calendar"]
         else DEFAULT_HOLIDAY_CALENDAR
     )
+    old_rate_holiday_calendar = (
+        existing["rate_holiday_calendar"] if existing and existing["rate_holiday_calendar"]
+        else old_holiday_calendar
+    )
+    old_period_holiday_calendar = (
+        existing["period_holiday_calendar"] if existing and existing["period_holiday_calendar"]
+        else old_holiday_calendar
+    )
     conn.execute("""
         UPDATE deal_master SET
             deal_name=?, client_name=?, notional_amount=?, spread=?, daily_floor=?, accrual_day_basis=?,
             rate_type=?, payment_frequency=?, observation_shift=?,
-            shifted_interest=?, payment_delay=?, holiday_calendar=?, payment_delay_days=?,
+            shifted_interest=?, payment_delay=?, holiday_calendar=?, rate_holiday_calendar=?,
+            period_holiday_calendar=?, payment_delay_days=?,
             rounding_decimals=?, look_back_days=?, calculation_method=?,
-            first_payment_date=?, maturity_date=?, status=?,
+            issue_date=?, first_payment_date=?, maturity_date=?, status=?,
             modified_at=datetime('now')
         WHERE cusip=?
     """, (
@@ -1848,15 +1949,20 @@ def update_deal(conn, cusip: str, d: dict):
         d.get("accrual_day_basis", "Calendar Days"),
         d["rate_type"], d["payment_frequency"], d["observation_shift"],
         d["shifted_interest"], d["payment_delay"], holiday_calendar,
+        rate_holiday_calendar, period_holiday_calendar,
         int(d.get("payment_delay_days") or 0),
         d["rounding_decimals"], d["look_back_days"], d["calculation_method"],
-        fpd, d["maturity_date"], d.get("status", "Active"),
+        d["issue_date"], fpd, d["maturity_date"], d.get("status", "Active"),
         cusip
     ))
     new_spread = float(d.get("spread") or 0)
     new_daily_floor = d.get("daily_floor")
     new_accrual_basis = d.get("accrual_day_basis", "Calendar Days")
-    if normalize_holiday_calendar(old_holiday_calendar) != holiday_calendar:
+    if (
+        normalize_holiday_calendar(old_holiday_calendar) != holiday_calendar
+        or normalize_holiday_calendar(old_rate_holiday_calendar) != rate_holiday_calendar
+        or normalize_holiday_calendar(old_period_holiday_calendar) != period_holiday_calendar
+    ):
         generate_schedule(conn, cusip, rebuild=True)
         return recalculate_existing_results(conn, cusip)
     if ((old_daily_floor is None) != (new_daily_floor is None)

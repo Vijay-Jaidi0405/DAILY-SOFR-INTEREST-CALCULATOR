@@ -300,6 +300,7 @@ def readiness_color(status: str, eligible: int) -> str:
 
 class CheckableComboBox(QComboBox):
     selection_changed = Signal(list)
+    ALL_VALUE = "ALL"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -341,6 +342,8 @@ class CheckableComboBox(QComboBox):
     def set_checked_values(self, values: list[str] | set[str]):
         values = set(values)
         values.update(self._required_values)
+        if self.ALL_VALUE in values:
+            values = {self.ALL_VALUE} | self._required_values
         for i in range(self.model().rowCount()):
             item = self.model().item(i)
             state = Qt.Checked if item.data(Qt.UserRole) in values else Qt.Unchecked
@@ -358,6 +361,18 @@ class CheckableComboBox(QComboBox):
             return
         next_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
         item.setData(next_state, Qt.CheckStateRole)
+        if next_state == Qt.Checked:
+            if value == self.ALL_VALUE:
+                for i in range(self.model().rowCount()):
+                    other = self.model().item(i)
+                    other_value = other.data(Qt.UserRole)
+                    if other_value != self.ALL_VALUE and other_value not in self._required_values:
+                        other.setData(Qt.Unchecked, Qt.CheckStateRole)
+            else:
+                for i in range(self.model().rowCount()):
+                    other = self.model().item(i)
+                    if other.data(Qt.UserRole) == self.ALL_VALUE:
+                        other.setData(Qt.Unchecked, Qt.CheckStateRole)
         self._refresh_text()
         self.selection_changed.emit(self.checked_values())
 

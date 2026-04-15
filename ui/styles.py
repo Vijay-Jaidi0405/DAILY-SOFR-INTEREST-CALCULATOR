@@ -281,6 +281,8 @@ QCalendarWidget {{
     border: 1px solid {BORDER};
     border-radius: 8px;
     font-size: 13px;
+    min-width: 320px;
+    min-height: 260px;
 }}
 QCalendarWidget QWidget {{
     background: {BG_WHITE};
@@ -290,12 +292,25 @@ QCalendarWidget QToolButton {{
     background: {ACCENT};
     color: white;
     border-radius: 4px;
-    padding: 4px 10px;
+    padding: 2px 6px;
     font-weight: 600;
-    font-size: 13px;
-    min-height: 32px;
+    font-size: 12px;
+    min-height: 24px;
+    border: none;
 }}
 QCalendarWidget QToolButton:hover {{ background: #22497E; }}
+QCalendarWidget QToolButton#qt_calendar_prevmonth,
+QCalendarWidget QToolButton#qt_calendar_nextmonth {{
+    min-width: 24px;
+    max-width: 24px;
+    padding: 0;
+}}
+QCalendarWidget QToolButton#qt_calendar_monthbutton {{
+    min-width: 96px;
+}}
+QCalendarWidget QToolButton#qt_calendar_yearbutton {{
+    min-width: 56px;
+}}
 QCalendarWidget QMenu {{
     background: {BG_WHITE};
     border: 1px solid {BORDER};
@@ -305,14 +320,15 @@ QCalendarWidget QSpinBox {{
     border: 1px solid {BORDER};
     border-radius: 4px;
     color: {TEXT_DARK};
-    font-size: 13px;
-    padding: 2px 6px;
-    min-height: 28px;
+    font-size: 12px;
+    padding: 0 4px;
+    min-height: 24px;
+    min-width: 64px;
 }}
 QCalendarWidget QWidget#qt_calendar_navigationbar {{
     background: {ACCENT};
     border-radius: 8px 8px 0 0;
-    padding: 6px;
+    padding: 4px;
 }}
 QCalendarWidget QTableView {{
     background: {BG_WHITE};
@@ -323,9 +339,13 @@ QCalendarWidget QTableView {{
     gridline-color: #E5E7EB;
     outline: 0;
 }}
+QCalendarWidget QTableView:enabled {{
+    border: none;
+}}
 QCalendarWidget QTableView::item {{
     background: {BG_WHITE};
     color: {TEXT_DARK};
+    padding: 2px;
 }}
 QCalendarWidget QTableView::item:selected {{
     background: {ACCENT};

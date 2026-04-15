@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QGuiApplication
 
 from ui.styles import APP_STYLE, NAV_WIDTH
 from ui.pages.dashboard   import DashboardPage
@@ -36,7 +37,7 @@ class NavButton(QPushButton):
         self.setObjectName("NavBtn")
         self.setCheckable(False)
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(46)
+        self.setMinimumHeight(42)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_active(self, active: bool):
@@ -52,10 +53,10 @@ class MainWindow(QMainWindow):
         self._nav_btns = []
         self._pages = []
         self.setWindowTitle("SOFR Interest Calculator")
-        self.setMinimumSize(900, 600)
-        self.showMaximized()
+        self.setMinimumSize(820, 560)
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
+        self._apply_initial_window_geometry()
         self._switch_page(0)
 
     def _build_ui(self):
@@ -119,11 +120,11 @@ class MainWindow(QMainWindow):
         right = QWidget()
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
-        right_lay.setSpacing(6)
+        right_lay.setSpacing(4)
 
         top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(12, 8, 12, 0)
-        top_bar.setSpacing(10)
+        top_bar.setContentsMargins(10, 6, 10, 0)
+        top_bar.setSpacing(8)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search CUSIP / Deal / Client across pages…")
         self._search.setClearButtonEnabled(True)
@@ -152,6 +153,20 @@ class MainWindow(QMainWindow):
 
         from core.database import DB_PATH
         self._db_lbl.setText(f"DB: {DB_PATH}")
+
+    def _apply_initial_window_geometry(self):
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if not screen:
+            self.resize(1280, 800)
+            return
+        available = screen.availableGeometry()
+        target_width = min(available.width() - 40, max(820, int(available.width() * 0.92)))
+        target_height = min(available.height() - 30, max(560, int(available.height() * 0.9)))
+        self.resize(target_width, target_height)
+        self.move(
+            available.x() + max(0, (available.width() - target_width) // 2),
+            available.y() + max(0, (available.height() - target_height) // 2),
+        )
 
     def _switch_page(self, idx: int):
         for i, btn in enumerate(self._nav_btns):

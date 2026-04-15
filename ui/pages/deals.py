@@ -4,10 +4,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QDialog, QFormLayout, QDialogButtonBox,
     QMessageBox, QDoubleSpinBox, QSpinBox, QDateEdit, QScrollArea,
-    QSizePolicy, QFrame, QGroupBox, QCheckBox
+    QSizePolicy, QFrame, QGroupBox, QCheckBox, QFileDialog, QProgressBar
 )
-from PySide6.QtCore import Qt, QDate, QTimer
-from PySide6.QtGui import QFont, QIntValidator
+from PySide6.QtCore import Qt, QDate, QTimer, QThread, Signal
+from PySide6.QtGui import QFont, QIntValidator, QGuiApplication
 from ui.widgets.common import (
     Panel, PageHeader, DataTable, fmt_money, fmt_date, make_date_item,
     CheckableComboBox
@@ -32,6 +32,25 @@ HOLIDAY_SET_OPTIONS = [
     ("LONDON", "London"),
     ("TOKYO", "Tokyo"),
 ]
+
+
+class _DealImportThread(QThread):
+    done = Signal(int, list)
+    error = Signal(str)
+
+    def __init__(self, db_factory, path):
+        super().__init__()
+        self._db = db_factory
+        self._path = path
+
+    def run(self):
+        try:
+            from core.database import import_deals_from_excel
+            with self._db() as conn:
+                n, errs = import_deals_from_excel(conn, self._path)
+            self.done.emit(n, errs)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 def _divider():
@@ -61,10 +80,10 @@ class DealDialog(QDialog):
     def __init__(self, parent=None, deal: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Add Deal" if deal is None else "Edit Deal")
-        self.setMinimumWidth(680)
-        self.setMinimumHeight(700)
+        self.setMinimumSize(620, 560)
         self._deal = deal
         self._build()
+        self._apply_dialog_geometry()
         if deal:
             self._populate(deal)
         else:
@@ -332,6 +351,16 @@ class DealDialog(QDialog):
         self.f_pay_delay.currentTextChanged.connect(self._on_pay_delay)
         self.f_use_floor.toggled.connect(self._on_use_floor)
         self._on_rate_type(self.f_rate_type.currentText())
+
+    def _apply_dialog_geometry(self):
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if not screen:
+            self.resize(760, 680)
+            return
+        available = screen.availableGeometry()
+        width = min(820, max(620, int(available.width() * 0.72)))
+        height = min(760, max(560, int(available.height() * 0.82)))
+        self.resize(width, height)
 
     # ── signal handlers ───────────────────────────────────────────────────────
 
@@ -602,6 +631,7 @@ class DealsPage(QWidget):
         super().__init__(parent)
         self._db = db_factory
         self._all_rows = []
+        self._visible_rows = []
         self._build_ui()
 
     def _build_ui(self):
@@ -617,6 +647,8 @@ class DealsPage(QWidget):
         hdr.addStretch()
         for label, obj, slot in [
             ("+ Add Deal",   "PrimaryBtn", self._add),
+            ("Bulk Upload",  "",           self._bulk_upload),
+            ("Download",     "",           self._export_deals),
             ("Edit",         "",           self._edit),
             ("Delete",       "DangerBtn",  self._delete),
             ("Gen Schedule", "GreenBtn",   self._gen_schedule),
@@ -650,6 +682,38 @@ class DealsPage(QWidget):
         filt.addWidget(self._count_lbl)
         lay.addLayout(filt)
 
+        import_row = QHBoxLayout()
+        import_row.setSpacing(10)
+        self._bulk_file_lbl = QLabel("No Excel file selected")
+        self._bulk_file_lbl.setStyleSheet("color:#6B7280;font-size:11px;")
+        self._bulk_browse_btn = QPushButton("Browse Excel…")
+        self._bulk_import_btn = QPushButton("Import Deals")
+        self._bulk_import_btn.setObjectName("PrimaryBtn")
+        self._bulk_prog = QProgressBar()
+        self._bulk_prog.setVisible(False)
+        self._bulk_prog.setRange(0, 0)
+        self._bulk_path = None
+
+        self._bulk_browse_btn.clicked.connect(self._browse_bulk_file)
+        self._bulk_import_btn.clicked.connect(self._import_bulk_file)
+
+        import_row.addWidget(self._bulk_file_lbl, 1)
+        import_row.addWidget(self._bulk_browse_btn)
+        import_row.addWidget(self._bulk_import_btn)
+        lay.addLayout(import_row)
+        lay.addWidget(self._bulk_prog)
+
+        bulk_hint = QLabel(
+            "Bulk upload deals from Excel. Required columns: "
+            "<b>Deal Name</b>, <b>Client Name</b>, <b>CUSIP</b>, "
+            "<b>Notional Amount</b>, <b>Rate Type</b>, "
+            "<b>Calculation Method</b>, <b>Issue Date</b>, "
+            "<b>First Payment Date</b>, <b>Maturity Date</b>."
+        )
+        bulk_hint.setWordWrap(True)
+        bulk_hint.setStyleSheet("color:#6B7280;font-size:10px;")
+        lay.addWidget(bulk_hint)
+
         # Table — note First Payment Date replaces Start Date
         cols = [
             "CUSIP", "Deal Name", "Client", "Issue Date", "Notional", "Spread", "Daily Floor",
@@ -671,6 +735,7 @@ class DealsPage(QWidget):
 
     def _render(self, deals):
         from core.database import holiday_calendar_label
+        self._visible_rows = list(deals)
         rows = []
         for d in deals:
             rows.append([
@@ -699,6 +764,73 @@ class DealsPage(QWidget):
             ])
         self._tbl.populate(rows)
         self._count_lbl.setText(f"{len(deals)} deals")
+
+    def _export_deals(self):
+        if not self._visible_rows:
+            QMessageBox.information(self, "No Data",
+                "There are no deal rows to download.")
+            return
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Download Deal Master Table",
+            "deal_master_export.xlsx",
+            "Excel Files (*.xlsx);;CSV Files (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            import pandas as pd
+            from core.database import holiday_calendar_label
+
+            export_rows = []
+            for d in self._visible_rows:
+                export_rows.append({
+                    "CUSIP": d["cusip"],
+                    "Deal Name": d["deal_name"],
+                    "Client Name": d["client_name"],
+                    "Issue Date": d.get("issue_date"),
+                    "Notional Amount": d["notional_amount"],
+                    "Spread": float(d.get("spread") or 0.0),
+                    "Daily Floor": d.get("daily_floor"),
+                    "Rate Type": d["rate_type"],
+                    "Payment Frequency": d["payment_frequency"],
+                    "Calculation Method": d["calculation_method"],
+                    "Observation Shift": d["observation_shift"],
+                    "Shifted Interest": d["shifted_interest"],
+                    "Payment Delay": d["payment_delay"],
+                    "Payment Delay Days": int(d.get("payment_delay_days") or 0),
+                    "Accrual Day Basis": d.get("accrual_day_basis") or "Calendar Days",
+                    "Look Back Days": int(d.get("look_back_days") or 0),
+                    "Rounding Decimals": int(d.get("rounding_decimals") or 7),
+                    "Rate Holiday Calendar": d.get("rate_holiday_calendar") or d.get("holiday_calendar"),
+                    "Rate Holiday Label": holiday_calendar_label(
+                        d.get("rate_holiday_calendar") or d.get("holiday_calendar")
+                    ),
+                    "Period Holiday Calendar": d.get("period_holiday_calendar") or d.get("holiday_calendar"),
+                    "Period Holiday Label": holiday_calendar_label(
+                        d.get("period_holiday_calendar") or d.get("holiday_calendar")
+                    ),
+                    "First Payment Date": d.get("first_payment_date") or d.get("start_date"),
+                    "Maturity Date": d.get("maturity_date"),
+                    "Status": d["status"],
+                })
+
+            df = pd.DataFrame(export_rows)
+            lower_path = path.lower()
+            if selected_filter.startswith("CSV") or lower_path.endswith(".csv"):
+                if not lower_path.endswith(".csv"):
+                    path += ".csv"
+                df.to_csv(path, index=False)
+            else:
+                if not lower_path.endswith(".xlsx"):
+                    path += ".xlsx"
+                df.to_excel(path, index=False)
+            QMessageBox.information(
+                self, "Download Complete",
+                f"Exported {len(export_rows)} deal row(s) to:\n{path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Download Error", str(e))
 
     def _filter(self):
         q   = self._search.text().lower()
@@ -739,6 +871,51 @@ class DealsPage(QWidget):
             self._load()
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
+
+    def _bulk_upload(self):
+        self._browse_bulk_file()
+
+    def _browse_bulk_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Deal Excel File", "", "Excel Files (*.xlsx *.xls)"
+        )
+        if not path:
+            return
+        self._bulk_path = path
+        self._bulk_file_lbl.setText(path.split("/")[-1])
+
+    def _import_bulk_file(self):
+        if not self._bulk_path:
+            QMessageBox.warning(self, "No File",
+                "Please browse and select an Excel file first.")
+            return
+        self._bulk_prog.setVisible(True)
+        self._bulk_browse_btn.setEnabled(False)
+        self._bulk_import_btn.setEnabled(False)
+
+        thread = _DealImportThread(self._db, self._bulk_path)
+        thread.done.connect(self._on_bulk_import_done)
+        thread.error.connect(self._on_bulk_import_error)
+        self._bulk_thread = thread
+        thread.start()
+
+    def _on_bulk_import_done(self, inserted, errs):
+        self._bulk_prog.setVisible(False)
+        self._bulk_browse_btn.setEnabled(True)
+        self._bulk_import_btn.setEnabled(True)
+        msg = f"{inserted} deal row(s) imported into Deal Master."
+        if errs:
+            msg += f"\n{len(errs)} row(s) failed:\n" + "\n".join(errs[:8])
+            if len(errs) > 8:
+                msg += "\n..."
+        QMessageBox.information(self, "Import Complete", msg)
+        self._load()
+
+    def _on_bulk_import_error(self, err):
+        self._bulk_prog.setVisible(False)
+        self._bulk_browse_btn.setEnabled(True)
+        self._bulk_import_btn.setEnabled(True)
+        QMessageBox.critical(self, "Import Error", err)
 
     def _edit(self):
         deal = self._selected_deal()

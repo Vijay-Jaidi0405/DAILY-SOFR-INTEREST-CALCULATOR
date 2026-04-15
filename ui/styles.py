@@ -1,6 +1,6 @@
 """ui/styles.py — Application-wide stylesheet and colour constants."""
 
-NAV_WIDTH = 210
+NAV_WIDTH = 184
 ACCENT    = "#1B3A6B"
 ACCENT2   = "#0D5C63"
 GREEN     = "#0F6E56"
@@ -39,15 +39,15 @@ QMainWindow, QDialog, QWidget {{
 }}
 #AppTitle {{
     color: #FFFFFF;
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 700;
-    padding: 22px 16px 2px 16px;
+    padding: 18px 14px 2px 14px;
     letter-spacing: 0.5px;
 }}
 #AppSubtitle {{
     color: #93B8DC;
     font-size: 10px;
-    padding: 0 16px 16px 16px;
+    padding: 0 14px 14px 14px;
     letter-spacing: 0.3px;
 }}
 #NavDivider {{
@@ -61,10 +61,10 @@ QMainWindow, QDialog, QWidget {{
     border: none;
     border-left: 3px solid transparent;
     text-align: left;
-    padding: 12px 16px 12px 13px;
-    font-size: 13px;
+    padding: 10px 14px 10px 11px;
+    font-size: 12px;
     border-radius: 0;
-    min-height: 44px;
+    min-height: 40px;
 }}
 #NavBtn:hover {{
     background: rgba(255,255,255,0.09);
@@ -81,21 +81,21 @@ QMainWindow, QDialog, QWidget {{
     color: #4E6D96;
     font-size: 9px;
     font-weight: 700;
-    padding: 16px 16px 4px 16px;
+    padding: 14px 14px 4px 14px;
     letter-spacing: 1.5px;
     text-transform: uppercase;
 }}
 #NavVersion {{
     color: #3D5A82;
     font-size: 10px;
-    padding: 12px 16px;
+    padding: 10px 14px;
 }}
 
 /* ═══════════════════════════════════════════════════════
    PAGE HEADERS
 ═══════════════════════════════════════════════════════ */
 #PageTitle {{
-    font-size: 22px;
+    font-size: 20px;
     font-weight: 700;
     color: {ACCENT};
     letter-spacing: -0.3px;
@@ -282,6 +282,10 @@ QCalendarWidget {{
     border-radius: 8px;
     font-size: 13px;
 }}
+QCalendarWidget QWidget {{
+    background: {BG_WHITE};
+    color: {TEXT_DARK};
+}}
 QCalendarWidget QToolButton {{
     background: {ACCENT};
     color: white;
@@ -309,6 +313,26 @@ QCalendarWidget QWidget#qt_calendar_navigationbar {{
     background: {ACCENT};
     border-radius: 8px 8px 0 0;
     padding: 6px;
+}}
+QCalendarWidget QTableView {{
+    background: {BG_WHITE};
+    alternate-background-color: #F8FAFC;
+    color: {TEXT_DARK};
+    selection-background-color: {ACCENT};
+    selection-color: #FFFFFF;
+    gridline-color: #E5E7EB;
+    outline: 0;
+}}
+QCalendarWidget QTableView::item {{
+    background: {BG_WHITE};
+    color: {TEXT_DARK};
+}}
+QCalendarWidget QTableView::item:selected {{
+    background: {ACCENT};
+    color: #FFFFFF;
+}}
+QCalendarWidget QTableView::item:disabled {{
+    color: {TEXT_SOFT};
 }}
 QCalendarWidget QAbstractItemView {{
     background: {BG_WHITE};

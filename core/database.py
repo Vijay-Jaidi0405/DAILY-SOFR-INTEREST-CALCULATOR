@@ -1975,6 +1975,214 @@ def update_deal(conn, cusip: str, d: dict):
     return {"schedule_rows_updated": 0, "log_rows_updated": 0}
 
 
+def import_deals_from_excel(conn, path: str) -> tuple[int, list[str]]:
+    """
+    Import deal master rows from Excel.
+
+    Required columns:
+    - Deal Name
+    - Client Name
+    - CUSIP
+    - Notional Amount
+    - Rate Type
+    - Calculation Method
+    - Issue Date
+    - First Payment Date (or Start Date)
+    - Maturity Date
+
+    Optional columns fall back to the same defaults used by the deal dialog.
+    """
+    import pandas as pd
+
+    df = pd.read_excel(path, header=0)
+    raw_cols = list(df.columns)
+    norm_cols = [str(c).strip().lower().replace("_", " ") for c in raw_cols]
+
+    if not raw_cols:
+        raise ValueError("The selected Excel file does not contain any columns.")
+
+    rate_types = ("SOFR", "SOFR Index")
+    frequencies = ("Monthly", "Quarterly")
+    methods = (
+        "Compounded in Arrears",
+        "Simple Average in Arrears",
+        "SOFR Index",
+    )
+
+    def _norm_text(value) -> str:
+        return str(value or "").strip()
+
+    def _pick_col(*names):
+        choices = {name.strip().lower().replace("_", " ") for name in names}
+        for i, col in enumerate(norm_cols):
+            if col in choices:
+                return raw_cols[i]
+        return None
+
+    def _cell(row, *names, default=None):
+        col = _pick_col(*names)
+        if col is None:
+            return default
+        value = row.get(col, default)
+        if pd.isna(value):
+            return default
+        return value
+
+    def _parse_text(row, *names, default="", required=False):
+        value = _norm_text(_cell(row, *names, default=default))
+        if required and not value:
+            raise ValueError(f"{names[0]} is required")
+        return value
+
+    def _parse_float(row, *names, default=0.0, required=False):
+        value = _cell(row, *names, default=default)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            value = default
+        if pd.isna(value):
+            value = default
+        if required and value == default and default in ("", None):
+            raise ValueError(f"{names[0]} is required")
+        try:
+            return float(str(value).replace(",", "").replace("$", "").replace("%", "").strip())
+        except Exception as e:
+            raise ValueError(f"{names[0]} must be numeric") from e
+
+    def _parse_int(row, *names, default=0):
+        value = _cell(row, *names, default=default)
+        if value is None or (isinstance(value, str) and not value.strip()) or pd.isna(value):
+            return int(default)
+        try:
+            return int(float(str(value).replace(",", "").strip()))
+        except Exception as e:
+            raise ValueError(f"{names[0]} must be a whole number") from e
+
+    def _parse_date(row, *names, required=False):
+        value = _cell(row, *names, default=None)
+        if value is None or (isinstance(value, str) and not value.strip()) or pd.isna(value):
+            if required:
+                raise ValueError(f"{names[0]} is required")
+            return None
+        try:
+            return pd.to_datetime(value, errors="raise").date().isoformat()
+        except Exception as e:
+            raise ValueError(f"{names[0]} must be a valid date") from e
+
+    def _parse_choice(row, names, allowed, default):
+        value = _cell(row, *names, default=default)
+        text = _norm_text(value)
+        if not text:
+            return default
+        allowed_map = {option.upper(): option for option in allowed}
+        resolved = allowed_map.get(text.upper())
+        if not resolved:
+            raise ValueError(f"{names[0]} must be one of: {', '.join(allowed)}")
+        return resolved
+
+    def _parse_yn(row, *names, default="N"):
+        value = _cell(row, *names, default=default)
+        text = _norm_text(value).upper()
+        if not text:
+            return default
+        truthy = {"Y", "YES", "TRUE", "1"}
+        falsy = {"N", "NO", "FALSE", "0"}
+        if text in truthy:
+            return "Y"
+        if text in falsy:
+            return "N"
+        raise ValueError(f"{names[0]} must be Y or N")
+
+    inserted, errors = 0, []
+    seen_cusips: set[str] = set()
+
+    for idx, row in df.iterrows():
+        if all(pd.isna(v) or not str(v).strip() for v in row.tolist()):
+            continue
+        try:
+            cusip = _parse_text(row, "CUSIP", required=True).upper()
+            if len(cusip) != 9:
+                raise ValueError("CUSIP must be exactly 9 characters")
+            if cusip in seen_cusips:
+                raise ValueError(f"Duplicate CUSIP {cusip} in upload file")
+            seen_cusips.add(cusip)
+
+            rate_type = _parse_choice(
+                row, ("Rate Type",), rate_types, "SOFR"
+            )
+            calculation_method = _parse_choice(
+                row, ("Calculation Method", "Method"), methods, "Compounded in Arrears"
+            )
+            payment_delay = _parse_yn(row, "Payment Delay", default="N")
+            issue_date = _parse_date(row, "Issue Date", required=True)
+            first_payment_date = _parse_date(row, "First Payment Date", "Start Date", required=True)
+            maturity_date = _parse_date(row, "Maturity Date", required=True)
+            notional_amount = _parse_float(row, "Notional Amount", "Notional", required=True, default="")
+            if notional_amount <= 0:
+                raise ValueError("Notional Amount must be greater than zero")
+
+            if issue_date > first_payment_date:
+                raise ValueError("Issue Date must be on or before First Payment Date")
+            if first_payment_date >= maturity_date:
+                raise ValueError("Maturity Date must be after First Payment Date")
+
+            deal = {
+                "deal_name": _parse_text(row, "Deal Name", required=True),
+                "client_name": _parse_text(row, "Client Name", required=True),
+                "cusip": cusip,
+                "notional_amount": notional_amount,
+                "spread": _parse_float(row, "Spread", default=0.0),
+                "daily_floor": (
+                    _parse_float(row, "Daily Floor", default=0.0)
+                    if _norm_text(_cell(row, "Daily Floor", default=""))
+                    else None
+                ),
+                "rate_type": rate_type,
+                "payment_frequency": _parse_choice(
+                    row, ("Payment Frequency", "Frequency"), frequencies, "Quarterly"
+                ),
+                "calculation_method": calculation_method,
+                "observation_shift": _parse_yn(row, "Observation Shift", default="N"),
+                "shifted_interest": _parse_yn(row, "Shifted Interest", default="N"),
+                "payment_delay": payment_delay,
+                "payment_delay_days": (
+                    _parse_int(row, "Payment Delay Days", "Delay Days", default=0)
+                    if payment_delay == "Y" else 0
+                ),
+                "look_back_days": _parse_int(row, "Look Back Days", "Lookback", default=2),
+                "accrual_day_basis": _parse_choice(
+                    row, ("Accrual Day Basis", "Accrual Basis", "Accrual Days Basis"),
+                    ("Calendar Days", "Observation Period Days"),
+                    "Calendar Days",
+                ),
+                "holiday_calendar": normalize_holiday_calendar(
+                    _cell(row, "Holiday Calendar", default=DEFAULT_HOLIDAY_CALENDAR)
+                ),
+                "rate_holiday_calendar": normalize_holiday_calendar(
+                    _cell(row, "Rate Holiday Calendar", "Rate Holidays", default=_cell(row, "Holiday Calendar", default=DEFAULT_HOLIDAY_CALENDAR))
+                ),
+                "period_holiday_calendar": normalize_holiday_calendar(
+                    _cell(row, "Period Holiday Calendar", "Period Holidays", default=_cell(row, "Holiday Calendar", default=DEFAULT_HOLIDAY_CALENDAR))
+                ),
+                "rounding_decimals": _parse_int(row, "Rounding Decimals", "Rounding", default=7),
+                "issue_date": issue_date,
+                "first_payment_date": first_payment_date,
+                "maturity_date": maturity_date,
+                "status": _parse_choice(
+                    row, ("Status",), ("Active", "Inactive", "Matured"), "Active"
+                ),
+            }
+            if deal["shifted_interest"] == "Y" and deal["observation_shift"] == "N":
+                raise ValueError("Shifted Interest = Y requires Observation Shift = Y")
+            insert_deal(conn, deal)
+            inserted += 1
+        except Exception as e:
+            errors.append(f"Row {idx + 2}: {e}")
+
+    if inserted == 0 and not errors:
+        raise ValueError("No deal rows were found in the selected Excel file.")
+
+    return inserted, errors
+
+
 def delete_deal(conn, cusip: str):
     deal = conn.execute(
         "SELECT deal_id FROM deal_master WHERE cusip=?", (cusip,)

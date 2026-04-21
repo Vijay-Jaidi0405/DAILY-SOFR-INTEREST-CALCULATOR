@@ -136,7 +136,7 @@ class CalcSinglePage(QWidget):
         # ── Calculate button ──────────────────────────────────────────────────
         calc_btn = QPushButton("  Calculate Interest")
         calc_btn.setObjectName("PrimaryBtn")
-        calc_btn.setMinimumHeight(48)
+        calc_btn.setMinimumHeight(0)
         calc_btn.setFont(QFont("Segoe UI", 13, QFont.Bold))
         calc_btn.setStyleSheet("""
             QPushButton {
@@ -144,6 +144,7 @@ class CalcSinglePage(QWidget):
                 color: #FFFFFF;
                 border: none;
                 border-radius: 8px;
+                padding: 3px;
                 font-size: 14px;
                 font-weight: 700;
                 letter-spacing: 0.5px;
@@ -551,7 +552,10 @@ class CalcSinglePage(QWidget):
     def _populate_dates_from_period(self, period: dict):
         self._start.setDate(self._to_qdate(period["period_start_date"]))
         self._end.setDate(self._to_qdate(period["period_end_date"]))
-        pay = period.get("adj_payment_date") or period.get("unadj_payment_date")
+        # Roll back: Use period_end_date as the base for the payment calculation field.
+        # calculate_interest adds the delay_days internally when the Payment Delay flag is Y.
+        # For standard deals, period_end_date is already the same as the adjusted payment date.
+        pay = period.get("period_end_date")
         self._pay.setDate(self._to_qdate(pay))
         self._lbl_obs_start.setText(fmt_date(period["obs_start_date"]))
         self._lbl_obs_end.setText(fmt_date(period["obs_end_date"]))
@@ -626,6 +630,16 @@ class CalcSinglePage(QWidget):
                 f" ({res['spread']:.4f}%)"
             )
 
+        is_pay_delay = res.get("payment_delay_flag") == "Y"
+        obs_row_html = f"""
+  <tr style='background:#F1F5F9;'>
+    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Obs Start</td>
+    <td style='padding:10px 14px; color:#1E40AF; font-weight:700;'>{fmt_date(res['obs_start_date'])}</td>
+    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Obs End</td>
+    <td style='padding:10px 14px; color:#1E40AF; font-weight:700;'>{fmt_date(res['obs_end_date'])}</td>
+  </tr>
+""" if not is_pay_delay else ""
+
         html = f"""
 <div style='font-family:Segoe UI,Arial,sans-serif; font-size:13px; padding:16px;'>
 
@@ -674,12 +688,7 @@ class CalcSinglePage(QWidget):
     <td style='padding:10px 14px; color:#6B7280; font-size:12px; width:22%;'>Period End</td>
     <td style='padding:10px 14px; font-weight:600; width:28%;'>{fmt_date(res['period_end_date'])}</td>
   </tr>
-  <tr style='background:#F1F5F9;'>
-    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Obs Start</td>
-    <td style='padding:10px 14px; color:#1E40AF; font-weight:700;'>{fmt_date(res['obs_start_date'])}</td>
-    <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Obs End</td>
-    <td style='padding:10px 14px; color:#1E40AF; font-weight:700;'>{fmt_date(res['obs_end_date'])}</td>
-  </tr>
+  {obs_row_html}
   <tr>
     <td style='padding:10px 14px; color:#6B7280; font-size:12px;'>Payment Date</td>
     <td style='padding:10px 14px; font-weight:600;'>{fmt_date(res['payment_date'])}</td>
@@ -725,6 +734,7 @@ class CalcSinglePage(QWidget):
     def _build_daily_table(res: dict) -> str:
         method     = res.get("calculation_method", "")
         daily_rows = res.get("daily_rows") or []
+        is_pay_delay = res.get("payment_delay_flag") == "Y"
         if not daily_rows:
             return ""
 
@@ -787,6 +797,10 @@ class CalcSinglePage(QWidget):
                  if method == "Compounded in Arrears"
                  else "DAILY RATE DETAIL")
 
+        if is_pay_delay:
+            # Remove "Obs Date" from headers
+            cols = [c for c in cols if c != "Obs Date"]
+
         html = (
             f"<table width='100%' cellspacing='0' cellpadding='0' "
             f"style='border-collapse:collapse; border:1px solid #E2E8F0; border-radius:8px;'>"
@@ -811,6 +825,11 @@ class CalcSinglePage(QWidget):
             floor_tag = (" <span style='color:#B45309; font-size:9px; "
                          "font-weight:700;'>FLOOR</span>" if floored else "")
 
+            obs_date_cell = f"""
+                <td style='padding:7px 10px; font-family:monospace; font-size:12px; 
+                color:#1E40AF;'>{fmt_date(row['obs_date'])}{gf_tag}{floor_tag}</td>
+            """ if not is_pay_delay else ""
+
             if method == "Compounded in Arrears":
                 c4 = str(row["day_weight"])
                 c5 = f"{row['daily_factor']:.12f}"
@@ -825,8 +844,7 @@ class CalcSinglePage(QWidget):
                 f"<tr style='background:{bg};'>"
                 f"<td style='padding:7px 10px; font-family:monospace; font-size:12px;'>"
                 f"{fmt_date(row['date'])}</td>"
-                f"<td style='padding:7px 10px; font-family:monospace; font-size:12px; "
-                f"color:#1E40AF;'>{fmt_date(row['obs_date'])}{gf_tag}{floor_tag}</td>"
+                f"{obs_date_cell}"
                 f"<td style='padding:7px 10px; text-align:right; color:#065F46; "
                 f"font-weight:600;'>{row['sofr_rate']:.4f}%</td>"
                 f"<td style='padding:7px 10px; text-align:center;'>{c4}</td>"

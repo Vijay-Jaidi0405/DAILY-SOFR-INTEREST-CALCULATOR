@@ -25,6 +25,7 @@ sofr_app/
         ├── rates.py             # SOFR Rates — Excel import + viewer
         ├── schedule.py          # Payment Schedule — generate + view
         ├── calc_single.py       # Single CUSIP interest calculation
+        ├── holidays.py          # Holiday management page
         ├── calc_batch.py        # Batch calculation across multiple deals
         └── history.py           # Calculation audit log
 ```

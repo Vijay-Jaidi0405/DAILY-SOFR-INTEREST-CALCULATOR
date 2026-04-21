@@ -17,6 +17,7 @@ from ui.pages.schedule    import SchedulePage
 from ui.pages.calc_single import CalcSinglePage
 from ui.pages.calc_batch  import CalcBatchPage
 from ui.pages.history     import HistoryPage
+from ui.pages.holidays    import HolidaysPage
 
 
 NAV_ITEMS = [
@@ -24,6 +25,7 @@ NAV_ITEMS = [
     ("▣",  "Dashboard",          DashboardPage,   ""),
     ("≡",  "Deal Master",        DealsPage,       "DEALS"),
     ("↑",  "SOFR Rates",         RatesPage,       "RATES & CALC"),
+    ("📅", "Market Holidays",    HolidaysPage,    ""),
     ("⊡",  "Payment Schedule",   SchedulePage,    ""),
     ("◎",  "Single CUSIP Calc",  CalcSinglePage,  ""),
     ("⊕",  "Batch Calculation",  CalcBatchPage,   ""),

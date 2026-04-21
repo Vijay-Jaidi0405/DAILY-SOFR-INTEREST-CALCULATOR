@@ -156,6 +156,7 @@ class DataTable(QTableWidget):
     def __init__(self, headers: list[str], parent=None):
         super().__init__(0, len(headers), parent)
         self.setHorizontalHeaderLabels(headers)
+        self.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QTableWidget.SelectRows)
         self.setSelectionMode(QTableWidget.SingleSelection)
@@ -185,7 +186,8 @@ class DataTable(QTableWidget):
                 if isinstance(val, QTableWidgetItem):
                     item = val
                 else:
-                    item = QTableWidgetItem(str(val) if val is not None else "")
+                    item = QTableWidgetItem()
+                    item.setData(Qt.DisplayRole, val if val is not None else "")
                     item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
                 if bg:
                     item.setBackground(QBrush(QColor(bg)))

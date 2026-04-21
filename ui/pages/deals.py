@@ -16,6 +16,7 @@ from core.database import (
     DEFAULT_HOLIDAY_CALENDAR,
     deal_period_holiday_calendar,
     deal_rate_holiday_calendar,
+    HOLIDAY_CALENDAR_OPTIONS,
 )
 from ui.styles import GREEN, RED, ACCENT, BORDER
 
@@ -25,13 +26,7 @@ FREQS      = ["Monthly", "Quarterly"]
 YN         = ["N", "Y"]
 LOOKBACKS  = [0, 1, 2, 5]
 ACCRUAL_BASES = ["Calendar Days", "Observation Period Days"]
-HOLIDAY_SET_OPTIONS = [
-    ("ALL", "All Holidays"),
-    ("SIFMA", "SIFMA"),
-    ("US", "US Holidays"),
-    ("LONDON", "London"),
-    ("TOKYO", "Tokyo"),
-]
+HOLIDAY_SET_OPTIONS = HOLIDAY_CALENDAR_OPTIONS
 
 
 class _DealImportThread(QThread):
@@ -72,7 +67,7 @@ def _sec(text):
 
 class DealDialog(QDialog):
     """
-    Collects deal information including First Payment Date.
+    Collects deal information including the first schedule boundary date.
     Period start/end and observation dates are derived automatically
     and shown in a live preview panel inside the dialog.
     """
@@ -159,12 +154,10 @@ class DealDialog(QDialog):
         self.f_rate_type   = combo(RATE_TYPES)
         self.f_method      = combo(METHODS)
         self.f_frequency   = combo(FREQS)
-        self.f_rounding    = QComboBox()
-        self.f_rounding.setEditable(True)
-        self.f_rounding.addItems(["7", "4", "5", "6"])
-        self.f_rounding.setCurrentText("7")
-        self.f_rounding.setInsertPolicy(QComboBox.NoInsert)
-        self.f_rounding.lineEdit().setValidator(QIntValidator(0, 12, self))
+        self.f_rounding    = QSpinBox()
+        self.f_rounding.setRange(0, 20)
+        self.f_rounding.setValue(7)
+        self.f_rounding.setToolTip("Number of decimal places for rounding the final rate.")
 
         form2.addRow("Rate Type *",          self.f_rate_type)
         form2.addRow("Calculation Method *", self.f_method)
@@ -184,7 +177,9 @@ class DealDialog(QDialog):
         self.f_obs_shift   = combo(YN)
         self.f_shifted_int = combo(YN)
         self.f_pay_delay   = combo(YN)
-        self.f_lookback    = combo(LOOKBACKS)
+        self.f_lookback    = QSpinBox()
+        self.f_lookback.setRange(0, 999)
+        self.f_lookback.setValue(2)
         self.f_accrual_basis = combo(ACCRUAL_BASES)
         self.f_rate_holiday_sets = CheckableComboBox()
         for value, label in HOLIDAY_SET_OPTIONS:
@@ -223,7 +218,7 @@ class DealDialog(QDialog):
         # ── Section 4: Key dates ────────────────────────────────────────────
         body_lay.addWidget(_sec("Key Dates"))
 
-        # Three date pickers side by side: Issue Date | First Payment Date | Maturity Date
+        # Three date pickers side by side: Issue Date | First Boundary Date | Maturity Date
         dates_row = QHBoxLayout()
         dates_row.setSpacing(20)
 
@@ -237,12 +232,12 @@ class DealDialog(QDialog):
         issue_col.addWidget(self.f_issue_date)
 
         fpd_col = QVBoxLayout(); fpd_col.setSpacing(6)
-        fpd_lbl = QLabel("First Payment Date *")
-        fpd_lbl.setStyleSheet("font-size:12px;font-weight:600;color:#4B5563;")
+        self.f_boundary_lbl = QLabel("First Payment Date *")
+        self.f_boundary_lbl.setStyleSheet("font-size:12px;font-weight:600;color:#4B5563;")
         self.f_first_payment = QDateEdit()
         self.f_first_payment.setCalendarPopup(True)
         self.f_first_payment.setDate(QDate(2024, 4, 9))
-        fpd_col.addWidget(fpd_lbl)
+        fpd_col.addWidget(self.f_boundary_lbl)
         fpd_col.addWidget(self.f_first_payment)
 
         mat_col = QVBoxLayout(); mat_col.setSpacing(6)
@@ -333,7 +328,7 @@ class DealDialog(QDialog):
             self.f_cusip.setEnabled(False)
 
         # Wire signals for live preview + business rules
-        for w in [self.f_first_payment, self.f_maturity,
+        for w in [self.f_issue_date, self.f_first_payment, self.f_maturity,
                   self.f_obs_shift, self.f_shifted_int,
                   self.f_lookback, self.f_pay_delay, self.f_delay_days]:
             if hasattr(w, "dateChanged"):
@@ -400,7 +395,17 @@ class DealDialog(QDialog):
         self._refresh_preview()
 
     def _on_pay_delay(self, v):
-        self.f_delay_days.setEnabled(v == "Y")
+        is_payment_delay = v == "Y"
+        self.f_delay_days.setEnabled(is_payment_delay)
+        if is_payment_delay:
+            self.f_obs_shift.setCurrentText("N")
+            self.f_obs_shift.setEnabled(False)
+            self.f_shifted_int.setCurrentText("N")
+            self.f_shifted_int.setEnabled(False)
+        else:
+            self.f_obs_shift.setEnabled(True)
+            self.f_shifted_int.setEnabled(self.f_obs_shift.currentText() == "Y")
+        self.f_boundary_lbl.setText("Period End Date *" if v == "Y" else "First Payment Date *")
         self._refresh_preview()
 
     def _on_use_floor(self, enabled):
@@ -418,11 +423,12 @@ class DealDialog(QDialog):
             )
             from datetime import date, timedelta
 
-            fpd      = self.f_first_payment.date().toPython()
-            lb       = int(self.f_lookback.currentText())
-            obs_sh   = self.f_obs_shift.currentText() == "Y"
-            sh_int   = self.f_shifted_int.currentText() == "Y"
+            boundary = self.f_first_payment.date().toPython()
+            issue    = self.f_issue_date.date().toPython()
+            lb       = self.f_lookback.value()
             pay_del  = self.f_pay_delay.currentText() == "Y"
+            obs_sh   = self.f_obs_shift.currentText() == "Y" and not pay_del
+            sh_int   = self.f_shifted_int.currentText() == "Y"
             delay_d  = self.f_delay_days.value() if pay_del else 0
             freq     = self.f_frequency.currentText()
             months   = 1 if freq == "Monthly" else 3
@@ -434,17 +440,23 @@ class DealDialog(QDialog):
                 else ""
             )
 
-            # Period 1:
-            #   payment date  = first_payment_date (already given by user)
-            #   period end    = prev bday before payment date
-            #   period start  = first_payment_date - 1 period (rolled to next bday)
-            pay_date = _nearest_next_bday(fpd, holiday_calendar=period_holiday_calendar)
-            p_end    = _nearest_prev_bday(
-                pay_date - timedelta(days=1),
-                holiday_calendar=period_holiday_calendar
-            )
-            raw_start = _add_months(fpd, -months)   # go back one period
-            p_start   = _nearest_next_bday(raw_start, holiday_calendar=period_holiday_calendar)
+            if pay_del:
+                # For payment-delay deals, onboarding captures the first period-end boundary.
+                p_start = _nearest_next_bday(issue, holiday_calendar=period_holiday_calendar)
+                p_end = _nearest_next_bday(boundary, holiday_calendar=period_holiday_calendar)
+                pay_date = _nearest_next_bday(
+                    p_end + timedelta(days=delay_d),
+                    holiday_calendar=period_holiday_calendar
+                )
+            else:
+                # Standard deals use first payment date as the first period boundary.
+                pay_date = _nearest_next_bday(boundary, holiday_calendar=period_holiday_calendar)
+                p_end = _nearest_prev_bday(
+                    pay_date - timedelta(days=1),
+                    holiday_calendar=period_holiday_calendar
+                )
+                raw_start = _add_months(boundary, -months)
+                p_start = _nearest_next_bday(raw_start, holiday_calendar=period_holiday_calendar)
 
             # Shifted interest: effective period shifted back by lookback
             if sh_int:
@@ -474,9 +486,15 @@ class DealDialog(QDialog):
             self._prev_obs_start.setText(fmt_date(obs_s))
             self._prev_obs_end.setText(fmt_date(obs_e))
             self._prev_pay_date.setText(fmt_date(pay_date))
-            self._prev_note.setText(
+            period_note = (
+                f"Period includes {fmt_date(p_start)} to {fmt_date(p_end)} "
+                f"(excludes {fmt_date(p_end)})"
+                if pay_del else
                 f"Period includes {fmt_date(p_start)} to {fmt_date(p_end)} "
                 f"(excludes {fmt_date(pay_date)})"
+            )
+            self._prev_note.setText(
+                period_note
                 + (f"  ·  Obs window shifted {lb}d back" if obs_sh else "")
                 + (f"  ·  Eff period shifted {lb}d back" if sh_int else "")
                 + f"  ·  Rate holidays: {holiday_calendar_label(rate_holiday_calendar)}"
@@ -504,7 +522,11 @@ class DealDialog(QDialog):
         self.f_obs_shift.setCurrentText(d["observation_shift"])
         self.f_shifted_int.setCurrentText(d["shifted_interest"])
         self.f_pay_delay.setCurrentText(d["payment_delay"])
-        self.f_lookback.setCurrentText(str(d["look_back_days"]))
+        self.f_obs_shift.setEnabled(d["payment_delay"] != "Y")
+        self.f_shifted_int.setEnabled(
+            d["payment_delay"] != "Y" and d["observation_shift"] == "Y"
+        )
+        self.f_lookback.setValue(int(d["look_back_days"]))
         self.f_accrual_basis.setCurrentText(
             d.get("accrual_day_basis") or "Calendar Days"
         )
@@ -514,7 +536,7 @@ class DealDialog(QDialog):
         self.f_period_holiday_sets.set_checked_values(
             str(deal_period_holiday_calendar(d) or DEFAULT_HOLIDAY_CALENDAR).split("|")
         )
-        self.f_rounding.setCurrentText(str(d["rounding_decimals"]))
+        self.f_rounding.setValue(int(d["rounding_decimals"]))
         self.f_delay_days.setValue(int(d.get("payment_delay_days") or 0))
         self.f_delay_days.setEnabled(d["payment_delay"] == "Y")
 
@@ -548,10 +570,11 @@ class DealDialog(QDialog):
         issue = self.f_issue_date.date()
         fpd = self.f_first_payment.date()
         mat = self.f_maturity.date()
+        boundary_label = "Period End Date" if self.f_pay_delay.currentText() == "Y" else "First Payment Date"
         if issue > fpd:
-            errs.append("Issue Date must be on or before First Payment Date")
+            errs.append(f"Issue Date must be on or before {boundary_label}")
         if fpd >= mat:
-            errs.append("Maturity Date must be after First Payment Date")
+            errs.append(f"Maturity Date must be after {boundary_label}")
         rt = self.f_rate_type.currentText()
         m  = self.f_method.currentText()
         if rt == "SOFR Index" and m != "SOFR Index":
@@ -561,13 +584,6 @@ class DealDialog(QDialog):
         if (self.f_shifted_int.currentText() == "Y"
                 and self.f_obs_shift.currentText() == "N"):
             errs.append("Shifted Interest = Y requires Observation Shift = Y")
-        # No limit; "ALL" is allowed to combine every list.
-        try:
-            rounding_decimals = int(self.f_rounding.currentText())
-            if not 0 <= rounding_decimals <= 12:
-                errs.append("Rounding Decimals must be between 0 and 12")
-        except ValueError:
-            errs.append("Rounding Decimals must be a whole number")
         if errs:
             QMessageBox.warning(self, "Validation Errors",
                 "\n".join(f"• {e}" for e in errs))
@@ -588,18 +604,20 @@ class DealDialog(QDialog):
             "rate_type":          self.f_rate_type.currentText(),
             "payment_frequency":  self.f_frequency.currentText(),
             "calculation_method": self.f_method.currentText(),
-            "observation_shift":  self.f_obs_shift.currentText(),
-            "shifted_interest":   self.f_shifted_int.currentText(),
+            "observation_shift":  ("N" if self.f_pay_delay.currentText() == "Y"
+                                   else self.f_obs_shift.currentText()),
+            "shifted_interest":   ("N" if self.f_pay_delay.currentText() == "Y"
+                                   else self.f_shifted_int.currentText()),
             "payment_delay":      self.f_pay_delay.currentText(),
             "payment_delay_days": (self.f_delay_days.value()
                                    if self.f_pay_delay.currentText() == "Y"
                                    else 0),
-            "look_back_days":     int(self.f_lookback.currentText()),
+            "look_back_days":     self.f_lookback.value(),
             "accrual_day_basis":  self.f_accrual_basis.currentText(),
             "holiday_calendar":   self._selected_period_holiday_calendar(),
             "rate_holiday_calendar": self._selected_rate_holiday_calendar(),
             "period_holiday_calendar": self._selected_period_holiday_calendar(),
-            "rounding_decimals":  int(self.f_rounding.currentText() or "7"),
+            "rounding_decimals":  self.f_rounding.value(),
             "issue_date":         self.f_issue_date.date().toString("yyyy-MM-dd"),
             "first_payment_date": self.f_first_payment.date().toString("yyyy-MM-dd"),
             "maturity_date":      self.f_maturity.date().toString("yyyy-MM-dd"),
@@ -643,7 +661,7 @@ class DealsPage(QWidget):
         hdr = QHBoxLayout()
         hdr.setSpacing(10)
         hdr.addWidget(PageHeader("Deal Master",
-            "Manage all active deals — dates are derived from First Payment Date"))
+            "Manage all active deals — use First Payment Date normally, or Period End Date for payment-delay deals"))
         hdr.addStretch()
         for label, obj, slot in [
             ("+ Add Deal",   "PrimaryBtn", self._add),
@@ -708,7 +726,8 @@ class DealsPage(QWidget):
             "<b>Deal Name</b>, <b>Client Name</b>, <b>CUSIP</b>, "
             "<b>Notional Amount</b>, <b>Rate Type</b>, "
             "<b>Calculation Method</b>, <b>Issue Date</b>, "
-            "<b>First Payment Date</b>, <b>Maturity Date</b>."
+            "<b>First Payment Date</b> (or <b>Period End Date</b> for payment-delay deals), "
+            "<b>Maturity Date</b>."
         )
         bulk_hint.setWordWrap(True)
         bulk_hint.setStyleSheet("color:#6B7280;font-size:10px;")

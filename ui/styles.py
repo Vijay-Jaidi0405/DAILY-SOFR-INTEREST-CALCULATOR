@@ -163,11 +163,11 @@ QPushButton {{
     background: {BG_WHITE};
     border: 1.5px solid {BORDER};
     border-radius: 8px;
-    padding: 8px 18px;
+    padding: 3px;
     color: {TEXT_MID};
     font-size: 13px;
     font-weight: 500;
-    min-height: 36px;
+    min-height: 0px;
 }}
 QPushButton:hover  {{
     background: #F1F5F9;
@@ -186,9 +186,9 @@ QPushButton:disabled {{
     color: #FFFFFF;
     border: none;
     border-radius: 8px;
-    padding: 8px 22px;
+    padding: 3px;
     font-weight: 600;
-    min-height: 36px;
+    min-height: 0px;
 }}
 #PrimaryBtn:hover  {{ background: #22497E; }}
 #PrimaryBtn:pressed {{ background: #162F5C; }}
@@ -199,9 +199,9 @@ QPushButton:disabled {{
     color: #FFFFFF;
     border: none;
     border-radius: 8px;
-    padding: 8px 22px;
+    padding: 3px;
     font-weight: 600;
-    min-height: 36px;
+    min-height: 0px;
 }}
 #GreenBtn:hover  {{ background: #0C5C47; }}
 #GreenBtn:pressed {{ background: #094A38; }}
@@ -211,9 +211,9 @@ QPushButton:disabled {{
     color: #FFFFFF;
     border: none;
     border-radius: 8px;
-    padding: 8px 18px;
+    padding: 3px;
     font-weight: 600;
-    min-height: 36px;
+    min-height: 0px;
 }}
 #DangerBtn:hover {{ background: #7F1D1D; }}
 
@@ -550,6 +550,7 @@ QFormLayout QLabel {{
 }}
 QDialogButtonBox QPushButton {{
     min-width: 90px;
+    padding: 3px;
 }}
 QMessageBox {{
     background: {BG_WHITE};

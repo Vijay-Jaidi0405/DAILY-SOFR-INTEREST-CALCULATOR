@@ -22,11 +22,13 @@ HOLIDAY_CALENDAR_OPTIONS = [
     ("US", "US Holidays"),
     ("LONDON", "London"),
     ("TOKYO", "Tokyo"),
+    ("NYS", "New York Stock Exchange"),
+    ("NYF", "New York Fed"),
 ]
 HOLIDAY_CALENDAR_LABELS = {
     code: label for code, label in HOLIDAY_CALENDAR_OPTIONS
 }
-SUPPORTED_HOLIDAY_YEARS = range(2024, 2029)
+SUPPORTED_HOLIDAY_YEARS = range(2024, 2151)
 
 
 def normalize_holiday_calendar(value) -> str:
@@ -240,7 +242,7 @@ CREATE TABLE IF NOT EXISTS deal_master (
     holiday_calendar    TEXT    NOT NULL DEFAULT 'ALL',
     rate_holiday_calendar   TEXT    NOT NULL DEFAULT 'ALL',
     period_holiday_calendar TEXT    NOT NULL DEFAULT 'ALL',
-    rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals BETWEEN 0 AND 12),
+    rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals >= 0),
     look_back_days      INTEGER NOT NULL DEFAULT 2,
     calculation_method  TEXT    NOT NULL CHECK(calculation_method IN (
                             'Compounded in Arrears',
@@ -276,9 +278,15 @@ CREATE TABLE IF NOT EXISTS sofr_index (
 
 CREATE TABLE IF NOT EXISTS market_holidays (
     holiday_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    calendar_code   TEXT    NOT NULL,
-    holiday_date    TEXT    NOT NULL,
-    holiday_name    TEXT    NOT NULL
+    holiday_date    TEXT    NOT NULL UNIQUE,  -- Format: YYYY-MM-DD
+    holiday_day     TEXT    NOT NULL,         -- Day of week (e.g., Monday)
+    holiday_name    TEXT    NOT NULL,         -- Descriptive name
+    is_sifma        INTEGER NOT NULL DEFAULT 0, -- Boolean flags for each calendar
+    is_us           INTEGER NOT NULL DEFAULT 0,
+    is_london       INTEGER NOT NULL DEFAULT 0,
+    is_tokyo        INTEGER NOT NULL DEFAULT 0,
+    is_nys          INTEGER NOT NULL DEFAULT 0,
+    is_nyf          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS payment_schedule (
@@ -381,35 +389,59 @@ SIFMA_SEED_HOLIDAYS = [
 ]
 
 
-def _build_seed_holiday_rows() -> list[tuple[str, str, str]]:
-    rows = [("SIFMA", d, name) for d, name in SIFMA_SEED_HOLIDAYS]
-    rows.extend(("US", d, name) for d, name in SIFMA_SEED_HOLIDAYS)
-    for year in SUPPORTED_HOLIDAY_YEARS:
-        rows.extend(("LONDON", d, name) for d, name in _generate_london_holidays(year))
-        rows.extend(("TOKYO", d, name) for d, name in _generate_tokyo_holidays(year))
-    return rows
+def _build_seed_holiday_rows():
+    from datetime import date
+    data = {}  # date -> {name, flags}
+    
+    def add(code, dt_str, name):
+        if dt_str not in data:
+            data[dt_str] = {"name": name, "flags": set()}
+        data[dt_str]["flags"].add(code)
 
+    for d, name in SIFMA_SEED_HOLIDAYS:
+        for code in ["SIFMA", "US", "NYS", "NYF"]:
+            add(code, d, name)
+
+    for year in SUPPORTED_HOLIDAY_YEARS:
+        for d, name in _generate_london_holidays(year):
+            add("LONDON", d, name)
+        for d, name in _generate_tokyo_holidays(year):
+            add("TOKYO", d, name)
+            
+    records = []
+    for dt_str, info in data.items():
+        d_obj = date.fromisoformat(dt_str)
+        f = info["flags"]
+        records.append((
+            dt_str, d_obj.strftime("%A"), info["name"],
+            1 if "SIFMA" in f else 0, 1 if "US" in f else 0,
+            1 if "LONDON" in f else 0, 1 if "TOKYO" in f else 0,
+            1 if "NYS" in f else 0, 1 if "NYF" in f else 0
+        ))
+    return records
 
 SEED_HOLIDAY_ROWS = _build_seed_holiday_rows()
 
 
 # Pre-computed holiday sets for connection-free date rolling.
 _HOLIDAY_SETS: dict[str, set[date]] = {code: set() for code, _ in HOLIDAY_CALENDAR_OPTIONS}
-for calendar_code, holiday_date, _holiday_name in SEED_HOLIDAY_ROWS:
-    _HOLIDAY_SETS.setdefault(calendar_code, set()).add(date.fromisoformat(holiday_date))
-
+# Logic for initial load is handled in init_db re-seeding
 
 def _update_holiday_set(conn) -> None:
     """Reload cached holiday sets from the database."""
     global _HOLIDAY_SETS
     holiday_sets = {code: set() for code, _ in HOLIDAY_CALENDAR_OPTIONS}
     rows = conn.execute(
-        "SELECT calendar_code, holiday_date FROM market_holidays"
+        "SELECT * FROM market_holidays"
     ).fetchall()
     for row in rows:
-        holiday_sets.setdefault(row["calendar_code"], set()).add(
-            date.fromisoformat(row["holiday_date"])
-        )
+        dt = date.fromisoformat(row["holiday_date"])
+        if row["is_sifma"]:  holiday_sets["SIFMA"].add(dt)
+        if row["is_us"]:     holiday_sets["US"].add(dt)
+        if row["is_london"]: holiday_sets["LONDON"].add(dt)
+        if row["is_tokyo"]:  holiday_sets["TOKYO"].add(dt)
+        if row["is_nys"]:    holiday_sets["NYS"].add(dt)
+        if row["is_nyf"]:    holiday_sets["NYF"].add(dt)
     _HOLIDAY_SETS = holiday_sets
 
 
@@ -542,7 +574,7 @@ def init_db():
                         holiday_calendar    TEXT    NOT NULL DEFAULT 'ALL',
                         rate_holiday_calendar   TEXT    NOT NULL DEFAULT 'ALL',
                         period_holiday_calendar TEXT    NOT NULL DEFAULT 'ALL',
-                        rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals BETWEEN 0 AND 12),
+                        rounding_decimals   INTEGER NOT NULL DEFAULT 7 CHECK(rounding_decimals >= 0),
                         look_back_days      INTEGER NOT NULL DEFAULT 2,
                         calculation_method  TEXT    NOT NULL CHECK(calculation_method IN (
                                                 'Compounded in Arrears',
@@ -760,36 +792,132 @@ def init_db():
             holiday_cols = [
                 r[1] for r in conn.execute("PRAGMA table_info(market_holidays)").fetchall()
             ]
-            if "calendar_code" not in holiday_cols:
+            # Migration: if we find the old 'calendar_code' column OR missing 'holiday_day', 
+            # drop the table so it can be recreated in the new wide format.
+            if holiday_cols and ("calendar_code" in holiday_cols or "holiday_day" not in holiday_cols):
                 conn.execute("PRAGMA foreign_keys=OFF")
                 conn.executescript("""
-                    ALTER TABLE market_holidays RENAME TO market_holidays_old;
-                    CREATE TABLE market_holidays (
-                        holiday_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                        calendar_code   TEXT    NOT NULL,
-                        holiday_date    TEXT    NOT NULL,
-                        holiday_name    TEXT    NOT NULL
-                    );
-                    INSERT INTO market_holidays (calendar_code, holiday_date, holiday_name)
-                    SELECT 'SIFMA', holiday_date, holiday_name
-                    FROM market_holidays_old;
-                    DROP TABLE market_holidays_old;
-                    CREATE UNIQUE INDEX IF NOT EXISTS ix_holidays_calendar_date
-                        ON market_holidays(calendar_code, holiday_date);
-                    CREATE INDEX IF NOT EXISTS ix_holidays_date
-                        ON market_holidays(holiday_date);
+                    DROP TABLE IF EXISTS market_holidays;
                 """)
                 conn.execute("PRAGMA foreign_keys=ON")
+                # Re-run schema to create the new table immediately
+                conn.executescript(SCHEMA)
         except Exception:
             pass
+
         conn.executemany(
-            "INSERT OR IGNORE INTO market_holidays(calendar_code, holiday_date, holiday_name) "
-            "VALUES(?,?,?)",
+            """INSERT OR IGNORE INTO market_holidays(
+                holiday_date, holiday_day, holiday_name, 
+                is_sifma, is_us, is_london, is_tokyo, is_nys, is_nyf
+            ) VALUES(?,?,?,?,?,?,?,?,?)""",
             SEED_HOLIDAY_ROWS
         )
         _update_holiday_set(conn)
         auto_mature_deals(conn)
 
+def get_holidays(conn, calendar_code=None):
+    q = "SELECT * FROM market_holidays"
+    args = []
+    if calendar_code and calendar_code != "ALL":
+        col = f"is_{calendar_code.lower()}"
+        q += f" WHERE {col} = 1"
+    q += " ORDER BY holiday_date DESC"
+    return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+def insert_holiday(conn, holiday_date, holiday_name, flags: dict):
+    from datetime import date
+    day_name = date.fromisoformat(holiday_date).strftime("%A")
+    conn.execute("""
+        INSERT OR REPLACE INTO market_holidays(
+            holiday_date, holiday_day, holiday_name,
+            is_sifma, is_us, is_london, is_tokyo, is_nys, is_nyf
+        ) VALUES(?,?,?,?,?,?,?,?,?)
+    """, (
+        holiday_date, day_name, holiday_name,
+        flags.get("SIFMA", 0), flags.get("US", 0),
+        flags.get("LONDON", 0), flags.get("TOKYO", 0),
+        flags.get("NYS", 0), flags.get("NYF", 0)
+    ))
+    _update_holiday_set(conn)
+
+def import_holidays_from_excel(conn, path: str) -> tuple[int, list[str]]:
+    """
+    Import market holidays from Excel.
+    Supports columns: Date, Name, and jurisdiction codes/labels.
+    """
+    import pandas as pd
+    from datetime import date
+
+    df = pd.read_excel(path, header=0)
+    raw_cols = list(df.columns)
+    norm_cols = [str(c).strip().lower() for c in raw_cols]
+
+    if not raw_cols:
+        raise ValueError("The selected Excel file does not contain any columns.")
+
+    def _pick_col(*names):
+        choices = {name.strip().lower() for name in names}
+        for i, col in enumerate(norm_cols):
+            if col in choices:
+                return raw_cols[i]
+        return None
+
+    def _parse_yn(val):
+        if pd.isna(val) or str(val).strip() == "": return 0
+        s = str(val).strip().upper()
+        if s in ("Y", "YES", "TRUE", "1", "✓", "X"): return 1
+        return 0
+
+    date_col = _pick_col("date", "holiday date")
+    name_col = _pick_col("name", "holiday name", "holiday")
+    
+    # Jurisdiction columns mapping (DB column -> list of possible Excel header names)
+    juris_map = {
+        "is_sifma":  ["sifma"],
+        "is_us":     ["us", "us holidays"],
+        "is_london": ["lon", "london"],
+        "is_tokyo":  ["tok", "tokyo"],
+        "is_nys":    ["nys", "new york stock exchange"],
+        "is_nyf":    ["nyf", "new york fed"]
+    }
+
+    inserted, errors = 0, []
+    for idx, row in df.iterrows():
+        if all(pd.isna(v) for v in row): continue
+        try:
+            if not date_col: raise ValueError("Date column missing")
+            dt_val = row[date_col]
+            dt_obj = pd.to_datetime(dt_val, errors="raise").date()
+            dt_str = dt_obj.isoformat()
+            day_name = dt_obj.strftime("%A")
+            
+            h_name = str(row.get(name_col, "Uploaded Holiday")).strip() if name_col else "Uploaded Holiday"
+            
+            flags = {}
+            for db_col, aliases in juris_map.items():
+                col = _pick_col(*aliases)
+                flags[db_col] = _parse_yn(row[col]) if col else 0
+
+            conn.execute("""
+                INSERT OR REPLACE INTO market_holidays(
+                    holiday_date, holiday_day, holiday_name,
+                    is_sifma, is_us, is_london, is_tokyo, is_nys, is_nyf
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+            """, (
+                dt_str, day_name, h_name,
+                flags["is_sifma"], flags["is_us"], flags["is_london"],
+                flags["is_tokyo"], flags["is_nys"], flags["is_nyf"]
+            ))
+            inserted += 1
+        except Exception as e:
+            errors.append(f"Row {idx+2}: {e}")
+
+    _update_holiday_set(conn)
+    return inserted, errors
+
+def delete_holiday(conn, holiday_id):
+    conn.execute("DELETE FROM market_holidays WHERE holiday_id = ?", (holiday_id,))
+    _update_holiday_set(conn)
 
 # ---------------------------------------------------------------------------
 # Date / business day helpers
@@ -1072,7 +1200,8 @@ def _calc_compounded(conn, deal: dict, p_start: date, p_end: date,
     lb = deal["look_back_days"]
     rate_holiday_calendar = deal_rate_holiday_calendar(deal)
     period_holiday_calendar = deal_period_holiday_calendar(deal)
-    use_obs_shift = deal.get("observation_shift") == "Y"
+    is_payment_delay = deal.get("payment_delay") == "Y"
+    use_obs_shift = deal.get("observation_shift") == "Y" and not is_payment_delay
     shifted_int = deal["shifted_interest"] == "Y"
     if shifted_int:
         eff_start = _shift_business_days_back(p_start, lb, holiday_calendar=rate_holiday_calendar)
@@ -1134,7 +1263,8 @@ def _calc_simple_average(conn, deal: dict, p_start: date, p_end: date,
     lb        = deal["look_back_days"]
     rate_holiday_calendar = deal_rate_holiday_calendar(deal)
     period_holiday_calendar = deal_period_holiday_calendar(deal)
-    use_obs_shift = deal.get("observation_shift") == "Y"
+    is_payment_delay = deal.get("payment_delay") == "Y"
+    use_obs_shift = deal.get("observation_shift") == "Y" and not is_payment_delay
     shifted_int = deal.get("shifted_interest") == "Y"
     if shifted_int:
         obs_start, obs_end = p_start, p_end
@@ -1486,17 +1616,25 @@ def _nearest_next_bday(d: date,
     return d
 
 
-def _gen_periods(deal_start: date, maturity: date, freq: str,
+def _gen_periods(anchor_date: date, maturity: date, freq: str,
                  delay_days: int = 0,
-                 holiday_calendar=DEFAULT_HOLIDAY_CALENDAR):
+                 holiday_calendar=DEFAULT_HOLIDAY_CALENDAR,
+                 *,
+                 anchor_is_period_end: bool = False,
+                 initial_period_start: date | None = None):
     """
     Generate (period_number, period_start, period_end, payment_date) tuples.
 
     Convention (ISDA/ARRC):
-      payment_date[N] = next_bday( deal_start + N*months + delay_days )
-      period_start[N] = payment_date[N-1]   (= deal_start for period 1)
-      period_end[N]   = payment_date[N]
-                        *** period_end is EXCLUSIVE from the accrual period ***
+      Standard deals:
+        payment_date[N] = next_bday(anchor_date + (N-1)*months + delay_days)
+        period_start[1] = next_bday(anchor_date - months)
+        period_end[N]   = payment_date[N]
+
+      Payment-delay deals:
+        period_end[N]   = next_bday(anchor_date + (N-1)*months)
+        payment_date[N] = next_bday(period_end[N] + delay_days)
+        period_start[1] = initial_period_start
 
     All payment dates and period dates are business days.
     The last period's exclusive end is on or before maturity
@@ -1505,45 +1643,57 @@ def _gen_periods(deal_start: date, maturity: date, freq: str,
     months        = 1 if freq == "Monthly" else 3
     maturity_bday = _nearest_next_bday(maturity, holiday_calendar=holiday_calendar)
 
-    # Period 1 starts one period BEFORE the first payment date
-    # e.g. first_payment_date=09-Apr-2024, Quarterly -> period 1 start = 09-Jan-2024
-    raw_p1_start = _add_months(deal_start, -months)
-    p1_start     = _nearest_next_bday(raw_p1_start, holiday_calendar=holiday_calendar)
+    if anchor_is_period_end:
+        if initial_period_start is None:
+            raise ValueError("initial_period_start is required for payment-delay schedules")
+        p1_start = _nearest_next_bday(initial_period_start, holiday_calendar=holiday_calendar)
+    else:
+        # Period 1 starts one period BEFORE the first payment date
+        # e.g. first_payment_date=09-Apr-2024, Quarterly -> period 1 start = 09-Jan-2024
+        raw_p1_start = _add_months(anchor_date, -months)
+        p1_start = _nearest_next_bday(raw_p1_start, holiday_calendar=holiday_calendar)
 
     periods  = []
-    prev_pay = p1_start   # period 1 starts here
+    prev_end = p1_start   # periods must be contiguous on interest boundaries
     num      = 1
 
-    while prev_pay < maturity_bday:
-        # Payment date N = first_payment_date + (N-1) * months + delay
-        raw_pay  = _add_months(deal_start, months * (num - 1)) + timedelta(days=delay_days)
-        pay_date = _nearest_next_bday(raw_pay, holiday_calendar=holiday_calendar)
+    while prev_end < maturity_bday:
+        # Contiguous interest periods: next period starts exactly where the last one ended
+        p_start = prev_end
 
-        # Cap at maturity
-        if pay_date > maturity_bday:
-            pay_date = maturity_bday
+        if anchor_is_period_end:
+            # Payment-delay deals: boundary is anchor_date + months
+            raw_end = _add_months(anchor_date, months * (num - 1))
+            p_end = _nearest_next_bday(raw_end, holiday_calendar=holiday_calendar)
+            if p_end > maturity_bday:
+                p_end = maturity_bday
+        else:
+            # Standard deals: boundary is the un-delayed marker
+            raw_pay = _add_months(anchor_date, months * (num - 1)) + timedelta(days=delay_days)
+            pay_date = _nearest_next_bday(raw_pay, holiday_calendar=holiday_calendar)
+            if pay_date > maturity_bday:
+                pay_date = maturity_bday
+            # Period end is equal to the payment date for standard deals
+            p_end = pay_date
 
-        # Period start = previous payment date (deal_start for period 1)
-        p_start = prev_pay
+        if anchor_is_period_end:
+            raw_pay = p_end + timedelta(days=delay_days)
+            pay_date = _nearest_next_bday(raw_pay, holiday_calendar=holiday_calendar)
 
-        # Period end is the exclusive boundary, equal to the payment date.
-        p_end = pay_date
-
-        # Guard: end must be strictly after start
+        # Guard: ensure end is strictly after start
         if p_end <= p_start:
             p_end = _nearest_next_bday(
                 p_start + timedelta(days=1),
                 holiday_calendar=holiday_calendar
             )
+            if anchor_is_period_end:
+                pay_date = _nearest_next_bday(p_end + timedelta(days=delay_days), holiday_calendar=holiday_calendar)
 
         periods.append((num, p_start, p_end, pay_date))
-
-        if pay_date >= maturity_bday:
+        if p_end >= maturity_bday:
             break
-
-        prev_pay = pay_date
+        prev_end = p_end
         num += 1
-
     return periods
 
 
@@ -1569,16 +1719,22 @@ def generate_schedule(conn, cusip: str, rebuild: bool = True):
     si      = deal["shifted_interest"] == "Y"
     rate_holiday_calendar = deal_rate_holiday_calendar(deal)
     period_holiday_calendar = deal_period_holiday_calendar(deal)
-    # first_payment_date is the anchor for all period calculations
-    fpd     = date.fromisoformat(
-                  deal.get("first_payment_date") or deal.get("start_date")
-              )
+    first_boundary = date.fromisoformat(
+        deal.get("first_payment_date") or deal.get("start_date")
+    )
+    issue_date = date.fromisoformat(deal["issue_date"])
     d_mat   = date.fromisoformat(deal["maturity_date"])
+    is_payment_delay = deal["payment_delay"] == "Y"
 
-    # Pass first_payment_date and delay into _gen_periods
-    periods  = _gen_periods(fpd, d_mat, deal["payment_frequency"],
-                            delay_days=delay,
-                            holiday_calendar=period_holiday_calendar)
+    periods = _gen_periods(
+        first_boundary,
+        d_mat,
+        deal["payment_frequency"],
+        delay_days=delay,
+        holiday_calendar=period_holiday_calendar,
+        anchor_is_period_end=is_payment_delay,
+        initial_period_start=issue_date if is_payment_delay else None,
+    )
     is_index = deal["calculation_method"] == "SOFR Index"
     rows = []
     for num, ps, pe, pay_date in periods:
@@ -2113,16 +2269,23 @@ def import_deals_from_excel(conn, path: str) -> tuple[int, list[str]]:
             )
             payment_delay = _parse_yn(row, "Payment Delay", default="N")
             issue_date = _parse_date(row, "Issue Date", required=True)
-            first_payment_date = _parse_date(row, "First Payment Date", "Start Date", required=True)
+            first_payment_date = _parse_date(
+                row,
+                "First Payment Date",
+                "Period End Date",
+                "Start Date",
+                required=True,
+            )
             maturity_date = _parse_date(row, "Maturity Date", required=True)
             notional_amount = _parse_float(row, "Notional Amount", "Notional", required=True, default="")
             if notional_amount <= 0:
                 raise ValueError("Notional Amount must be greater than zero")
 
+            boundary_label = "Period End Date" if payment_delay == "Y" else "First Payment Date"
             if issue_date > first_payment_date:
-                raise ValueError("Issue Date must be on or before First Payment Date")
+                raise ValueError(f"Issue Date must be on or before {boundary_label}")
             if first_payment_date >= maturity_date:
-                raise ValueError("Maturity Date must be after First Payment Date")
+                raise ValueError(f"Maturity Date must be after {boundary_label}")
 
             deal = {
                 "deal_name": _parse_text(row, "Deal Name", required=True),

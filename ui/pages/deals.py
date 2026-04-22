@@ -200,7 +200,7 @@ class DealDialog(QDialog):
         self.f_delay_days.setValue(2)
         self.f_delay_days.setEnabled(False)
         self.f_delay_days.setToolTip(
-            "Calendar days added to period end to compute payment date"
+            "Business days added to period end to compute payment date"
         )
 
         form3.addRow("Observation Shift",  self.f_obs_shift)

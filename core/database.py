@@ -956,6 +956,22 @@ def _shift_business_days_back(d: date, n: int,
     return cur
 
 
+def _shift_business_days_forward(d: date, n: int,
+                                 holiday_calendar=DEFAULT_HOLIDAY_CALENDAR) -> date:
+    """Shift forward by n business days using weekends and selected holidays."""
+    if n <= 0:
+        return d
+
+    holiday_dates = _holiday_dates_for_codes(holiday_calendar)
+    remaining = n
+    cur = d
+    while remaining > 0:
+        cur += timedelta(days=1)
+        if _is_business_day_in_set(cur, holiday_dates):
+            remaining -= 1
+    return cur
+
+
 def _nearest_rate_date(conn, d: date) -> date | None:
     """Nearest SOFR rate date on or before d (from sofr_rates table)."""
     if _is_good_friday(d):
@@ -1479,8 +1495,12 @@ def _calculate_interest_for_deal(conn, deal: dict, cusip: str,
     )
 
     actual_delay = delay_days if deal["payment_delay"] == "Y" else 0
-    raw_pay      = payment_date + timedelta(days=actual_delay)
-    adj_pay      = _next_business_day(
+    raw_pay = _shift_business_days_forward(
+        payment_date,
+        actual_delay,
+        holiday_calendar=deal_period_holiday_calendar(deal)
+    )
+    adj_pay = _next_business_day(
         conn, raw_pay,
         holiday_calendar=deal_period_holiday_calendar(deal)
     )
@@ -1627,13 +1647,13 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
 
     Convention (ISDA/ARRC):
       Standard deals:
-        payment_date[N] = next_bday(anchor_date + (N-1)*months + delay_days)
+        payment_date[N] = next_bday(anchor_date + (N-1)*months, then + delay_days business days)
         period_start[1] = next_bday(anchor_date - months)
         period_end[N]   = payment_date[N]
 
       Payment-delay deals:
         period_end[N]   = next_bday(anchor_date + (N-1)*months)
-        payment_date[N] = next_bday(period_end[N] + delay_days)
+        payment_date[N] = next_bday(period_end[N], then + delay_days business days)
         period_start[1] = initial_period_start
 
     All payment dates and period dates are business days.
@@ -1669,16 +1689,25 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
                 p_end = maturity_bday
         else:
             # Standard deals: boundary is the un-delayed marker
-            raw_pay = _add_months(anchor_date, months * (num - 1)) + timedelta(days=delay_days)
-            pay_date = _nearest_next_bday(raw_pay, holiday_calendar=holiday_calendar)
+            boundary_date = _add_months(anchor_date, months * (num - 1))
+            delayed_pay = _shift_business_days_forward(
+                boundary_date,
+                delay_days,
+                holiday_calendar=holiday_calendar
+            )
+            pay_date = _nearest_next_bday(delayed_pay, holiday_calendar=holiday_calendar)
             if pay_date > maturity_bday:
                 pay_date = maturity_bday
             # Period end is equal to the payment date for standard deals
             p_end = pay_date
 
         if anchor_is_period_end:
-            raw_pay = p_end + timedelta(days=delay_days)
-            pay_date = _nearest_next_bday(raw_pay, holiday_calendar=holiday_calendar)
+            delayed_pay = _shift_business_days_forward(
+                p_end,
+                delay_days,
+                holiday_calendar=holiday_calendar
+            )
+            pay_date = _nearest_next_bday(delayed_pay, holiday_calendar=holiday_calendar)
 
         # Guard: ensure end is strictly after start
         if p_end <= p_start:
@@ -1687,7 +1716,15 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
                 holiday_calendar=holiday_calendar
             )
             if anchor_is_period_end:
-                pay_date = _nearest_next_bday(p_end + timedelta(days=delay_days), holiday_calendar=holiday_calendar)
+                delayed_pay = _shift_business_days_forward(
+                    p_end,
+                    delay_days,
+                    holiday_calendar=holiday_calendar
+                )
+                pay_date = _nearest_next_bday(
+                    delayed_pay,
+                    holiday_calendar=holiday_calendar
+                )
 
         periods.append((num, p_start, p_end, pay_date))
         if p_end >= maturity_bday:

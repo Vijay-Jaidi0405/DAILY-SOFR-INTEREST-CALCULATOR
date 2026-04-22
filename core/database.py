@@ -1656,12 +1656,12 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
         payment_date[N] = next_bday(period_end[N], then + delay_days business days)
         period_start[1] = initial_period_start
 
-    All payment dates and period dates are business days.
-    The last period's exclusive end is on or before maturity
-    (also a business day).
+    All intermediate payment dates and period dates are business days.
+    The final period end and final payment date are always the onboarded
+    maturity date for every deal.
     """
     months        = 1 if freq == "Monthly" else 3
-    maturity_bday = _nearest_next_bday(maturity, holiday_calendar=holiday_calendar)
+    final_maturity = maturity
 
     if anchor_is_period_end:
         if initial_period_start is None:
@@ -1677,7 +1677,7 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
     prev_end = p1_start   # periods must be contiguous on interest boundaries
     num      = 1
 
-    while prev_end < maturity_bday:
+    while prev_end < final_maturity:
         # Contiguous interest periods: next period starts exactly where the last one ended
         p_start = prev_end
 
@@ -1685,8 +1685,8 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
             # Payment-delay deals: boundary is anchor_date + months
             raw_end = _add_months(anchor_date, months * (num - 1))
             p_end = _nearest_next_bday(raw_end, holiday_calendar=holiday_calendar)
-            if p_end > maturity_bday:
-                p_end = maturity_bday
+            if p_end >= final_maturity:
+                p_end = final_maturity
         else:
             # Standard deals: boundary is the un-delayed marker
             boundary_date = _add_months(anchor_date, months * (num - 1))
@@ -1696,8 +1696,8 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
                 holiday_calendar=holiday_calendar
             )
             pay_date = _nearest_next_bday(delayed_pay, holiday_calendar=holiday_calendar)
-            if pay_date > maturity_bday:
-                pay_date = maturity_bday
+            if pay_date >= final_maturity:
+                pay_date = final_maturity
             # Period end is equal to the payment date for standard deals
             p_end = pay_date
 
@@ -1708,6 +1708,10 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
                 holiday_calendar=holiday_calendar
             )
             pay_date = _nearest_next_bday(delayed_pay, holiday_calendar=holiday_calendar)
+
+        if p_end >= final_maturity:
+            p_end = final_maturity
+            pay_date = final_maturity
 
         # Guard: ensure end is strictly after start
         if p_end <= p_start:
@@ -1725,9 +1729,12 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
                     delayed_pay,
                     holiday_calendar=holiday_calendar
                 )
+            if p_end >= final_maturity:
+                p_end = final_maturity
+                pay_date = final_maturity
 
         periods.append((num, p_start, p_end, pay_date))
-        if p_end >= maturity_bday:
+        if p_end >= final_maturity:
             break
         prev_end = p_end
         num += 1

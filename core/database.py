@@ -7,6 +7,7 @@ calculation engine for all three methods.
 
 import sqlite3
 import math
+import re
 from datetime import date, timedelta
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,34 +17,162 @@ DB_PATH = Path(__file__).parent / "sofr_calculator.db"
 DEFAULT_HOLIDAY_CALENDAR = "ALL"
 DEFAULT_RATE_HOLIDAY_CALENDAR = DEFAULT_HOLIDAY_CALENDAR
 DEFAULT_PERIOD_HOLIDAY_CALENDAR = DEFAULT_HOLIDAY_CALENDAR
-HOLIDAY_CALENDAR_OPTIONS = [
+BUILTIN_HOLIDAY_CALENDAR_OPTIONS = [
     ("ALL", "All Holidays"),
-    ("SIFMA", "SIFMA"),
-    ("US", "US Holidays"),
     ("LONDON", "London"),
     ("TOKYO", "Tokyo"),
     ("NYS", "New York Stock Exchange"),
     ("NYF", "New York Fed"),
+    ("AUSTRALIA", "Australia"),
+    ("CANADA", "Canada"),
+    ("SINGAPORE", "Singapore"),
+    ("GERMANY", "Germany"),
 ]
+HOLIDAY_CALENDAR_OPTIONS = list(BUILTIN_HOLIDAY_CALENDAR_OPTIONS)
 HOLIDAY_CALENDAR_LABELS = {
     code: label for code, label in HOLIDAY_CALENDAR_OPTIONS
 }
 SUPPORTED_HOLIDAY_YEARS = range(2024, 2151)
 
+_BUILTIN_HOLIDAY_LABELS = {
+    code: label for code, label in BUILTIN_HOLIDAY_CALENDAR_OPTIONS
+}
+_BUILTIN_HOLIDAY_CODES = {
+    code for code, _ in BUILTIN_HOLIDAY_CALENDAR_OPTIONS if code != "ALL"
+}
+
+
+def _calendar_sort_key(item: tuple[str, str]) -> tuple[int, int, str]:
+    code, label = item
+    builtin_order = [opt[0] for opt in BUILTIN_HOLIDAY_CALENDAR_OPTIONS]
+    if code in builtin_order:
+        return (0, builtin_order.index(code), label)
+    return (1, 999, label)
+
+
+def _refresh_holiday_calendar_metadata(conn=None) -> None:
+    global HOLIDAY_CALENDAR_OPTIONS, HOLIDAY_CALENDAR_LABELS, _HOLIDAY_SETS
+
+    options = list(BUILTIN_HOLIDAY_CALENDAR_OPTIONS)
+    labels = dict(_BUILTIN_HOLIDAY_LABELS)
+    dynamic_codes = []
+    if conn is not None:
+        try:
+            rows = conn.execute("""
+                SELECT calendar_code, calendar_label
+                FROM holiday_calendars
+                WHERE is_active = 1
+                ORDER BY sort_order, calendar_label, calendar_code
+            """).fetchall()
+            for row in rows:
+                code = str(row["calendar_code"]).strip().upper()
+                label = str(row["calendar_label"]).strip() or code
+                if code == "ALL" or code in labels:
+                    continue
+                options.append((code, label))
+                labels[code] = label
+                dynamic_codes.append(code)
+        except Exception:
+            pass
+
+    options = sorted(options, key=_calendar_sort_key)
+    HOLIDAY_CALENDAR_OPTIONS = options
+    HOLIDAY_CALENDAR_LABELS = labels
+
+    existing_sets = globals().get("_HOLIDAY_SETS", {})
+    refreshed_sets: dict[str, set[date]] = {}
+    for code, _ in options:
+        if code == "ALL":
+            continue
+        refreshed_sets[code] = set(existing_sets.get(code, set()))
+    for code in dynamic_codes:
+        refreshed_sets.setdefault(code, set())
+    _HOLIDAY_SETS = refreshed_sets
+
+
+def list_holiday_calendars(conn=None, include_all: bool = True) -> list[tuple[str, str]]:
+    if conn is not None:
+        _refresh_holiday_calendar_metadata(conn)
+    if include_all:
+        return list(HOLIDAY_CALENDAR_OPTIONS)
+    return [(code, label) for code, label in HOLIDAY_CALENDAR_OPTIONS if code != "ALL"]
+
+
+def _sanitize_calendar_code(text: str) -> str:
+    code = re.sub(r"[^A-Z0-9]+", "_", str(text or "").strip().upper()).strip("_")
+    if not code:
+        raise ValueError("Holiday calendar name cannot be blank.")
+    if code[0].isdigit():
+        code = f"CAL_{code}"
+    if len(code) > 32:
+        code = code[:32].rstrip("_")
+    if code == "ALL":
+        raise ValueError("'ALL' is reserved for the combined holiday view.")
+    return code
+
+
+def ensure_holiday_calendar(conn, code_or_label: str, label: str | None = None,
+                            *, allow_existing_label_match: bool = True) -> tuple[str, str]:
+    raw_label = str(label or code_or_label or "").strip()
+    raw_code = _sanitize_calendar_code(code_or_label)
+
+    existing = conn.execute("""
+        SELECT calendar_code, calendar_label
+        FROM holiday_calendars
+        WHERE UPPER(calendar_code) = ?
+    """, (raw_code,)).fetchone()
+    if existing:
+        resolved = (existing["calendar_code"], existing["calendar_label"])
+        _refresh_holiday_calendar_metadata(conn)
+        return resolved
+
+    if allow_existing_label_match and raw_label:
+        existing = conn.execute("""
+            SELECT calendar_code, calendar_label
+            FROM holiday_calendars
+            WHERE UPPER(calendar_label) = ?
+        """, (raw_label.upper(),)).fetchone()
+        if existing:
+            resolved = (existing["calendar_code"], existing["calendar_label"])
+            _refresh_holiday_calendar_metadata(conn)
+            return resolved
+
+    calendar_label = raw_label or raw_code
+    next_sort = conn.execute(
+        "SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_sort FROM holiday_calendars"
+    ).fetchone()["next_sort"]
+    conn.execute("""
+        INSERT INTO holiday_calendars(calendar_code, calendar_label, is_system, is_active, sort_order)
+        VALUES(?,?,?,?,?)
+    """, (raw_code, calendar_label, 0, 1, next_sort))
+    _refresh_holiday_calendar_metadata(conn)
+    return raw_code, calendar_label
+
 
 def normalize_holiday_calendar(value) -> str:
     if isinstance(value, (list, tuple, set)):
-        raw_codes = [str(v).strip().upper() for v in value]
+        raw_codes = [str(v).strip() for v in value]
     else:
         text = str(value or DEFAULT_HOLIDAY_CALENDAR).replace(",", "|")
-        raw_codes = [part.strip().upper() for part in text.split("|")]
+        raw_codes = [part.strip() for part in text.split("|")]
 
-    allowed = {code for code, _ in HOLIDAY_CALENDAR_OPTIONS}
-    raw_codes = [c for c in raw_codes if c in allowed]
+    allowed_by_code = {code.upper(): code for code, _ in HOLIDAY_CALENDAR_OPTIONS}
+    allowed_by_label = {
+        label.strip().upper(): code for code, label in HOLIDAY_CALENDAR_OPTIONS
+    }
+    resolved_codes = []
+    for raw_code in raw_codes:
+        token = raw_code.strip().upper()
+        if not token:
+            continue
+        resolved = allowed_by_code.get(token) or allowed_by_label.get(token)
+        if resolved:
+            resolved_codes.append(resolved)
+    raw_codes = resolved_codes
     # "ALL" means union of every holiday set, no need to store others
     if "ALL" in raw_codes:
         return "ALL"
-    codes = [code for code, _ in HOLIDAY_CALENDAR_OPTIONS if code in raw_codes]
+    codes = [code for code, _ in HOLIDAY_CALENDAR_OPTIONS if code in raw_codes and code != "ALL"]
     if not codes:
         codes = [DEFAULT_HOLIDAY_CALENDAR]
     return "|".join(dict.fromkeys(codes))
@@ -199,6 +328,99 @@ def _generate_tokyo_holidays(year: int) -> list[tuple[str, str]]:
 
     return [(d.isoformat(), name) for d, name in sorted(holidays.items())]
 
+
+def _observed_fixed_holiday(year: int, month: int, day: int, name: str) -> tuple[date, str]:
+    d = date(year, month, day)
+    if d.weekday() == 5:
+        return d - timedelta(days=1), f"{name} (observed)"
+    if d.weekday() == 6:
+        return d + timedelta(days=1), f"{name} (observed)"
+    return d, name
+
+
+def _observed_monday_holiday(year: int, month: int, day: int, name: str) -> tuple[date, str]:
+    d = date(year, month, day)
+    if d.weekday() == 5:
+        return d + timedelta(days=2), f"{name} (observed)"
+    if d.weekday() == 6:
+        return d + timedelta(days=1), f"{name} (observed)"
+    return d, name
+
+
+def _append_boxing_day_observed(holidays: list[tuple[date, str]], year: int) -> None:
+    dec_25 = date(year, 12, 25)
+    dec_26 = date(year, 12, 26)
+    holidays.append((dec_25, "Christmas Day"))
+    if dec_26.weekday() == 5:
+        holidays.append((date(year, 12, 28), "Boxing Day (observed)"))
+    elif dec_26.weekday() == 6:
+        holidays.append((date(year, 12, 28), "Boxing Day (observed)"))
+    else:
+        holidays.append((dec_26, "Boxing Day"))
+    if dec_25.weekday() == 5:
+        holidays[-2] = (date(year, 12, 27), "Christmas Day (observed)")
+    elif dec_25.weekday() == 6:
+        holidays[-2] = (date(year, 12, 27), "Christmas Day (observed)")
+
+
+def _generate_australia_holidays(year: int) -> list[tuple[str, str]]:
+    easter = _easter_sunday(year)
+    holidays = [
+        _observed_monday_holiday(year, 1, 1, "New Year's Day"),
+        _observed_monday_holiday(year, 1, 26, "Australia Day"),
+        (easter - timedelta(days=2), "Good Friday"),
+        (easter + timedelta(days=1), "Easter Monday"),
+        (date(year, 4, 25), "ANZAC Day"),
+        (_nth_weekday(year, 6, 0, 2), "King's Birthday"),
+    ]
+    _append_boxing_day_observed(holidays, year)
+    return [(d.isoformat(), name) for d, name in sorted(set(holidays))]
+
+
+def _generate_canada_holidays(year: int) -> list[tuple[str, str]]:
+    easter = _easter_sunday(year)
+    canada_day = _observed_fixed_holiday(year, 7, 1, "Canada Day")
+    truth_day = _observed_fixed_holiday(year, 9, 30, "National Day for Truth and Reconciliation")
+    holidays = [
+        _observed_monday_holiday(year, 1, 1, "New Year's Day"),
+        (easter - timedelta(days=2), "Good Friday"),
+        (_last_weekday(year, 5, 0), "Victoria Day"),
+        canada_day,
+        (_nth_weekday(year, 9, 0, 1), "Labour Day"),
+        truth_day,
+        (_nth_weekday(year, 10, 0, 2), "Thanksgiving"),
+    ]
+    _append_boxing_day_observed(holidays, year)
+    return [(d.isoformat(), name) for d, name in sorted(set(holidays))]
+
+
+def _generate_singapore_holidays(year: int) -> list[tuple[str, str]]:
+    easter = _easter_sunday(year)
+    holidays = [
+        _observed_monday_holiday(year, 1, 1, "New Year's Day"),
+        (easter - timedelta(days=2), "Good Friday"),
+        _observed_monday_holiday(year, 5, 1, "Labour Day"),
+        _observed_monday_holiday(year, 8, 9, "National Day"),
+        _observed_monday_holiday(year, 12, 25, "Christmas Day"),
+    ]
+    return [(d.isoformat(), name) for d, name in sorted(set(holidays))]
+
+
+def _generate_germany_holidays(year: int) -> list[tuple[str, str]]:
+    easter = _easter_sunday(year)
+    holidays = [
+        (date(year, 1, 1), "New Year's Day"),
+        (easter - timedelta(days=2), "Good Friday"),
+        (easter + timedelta(days=1), "Easter Monday"),
+        (date(year, 5, 1), "Labour Day"),
+        (easter + timedelta(days=39), "Ascension Day"),
+        (easter + timedelta(days=50), "Whit Monday"),
+        (date(year, 10, 3), "German Unity Day"),
+        (date(year, 12, 25), "Christmas Day"),
+        (date(year, 12, 26), "Second Day of Christmas"),
+    ]
+    return [(d.isoformat(), name) for d, name in sorted(set(holidays))]
+
 # ---------------------------------------------------------------------------
 # Connection helper
 # ---------------------------------------------------------------------------
@@ -289,6 +511,21 @@ CREATE TABLE IF NOT EXISTS market_holidays (
     is_nyf          INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS holiday_calendars (
+    calendar_code   TEXT    PRIMARY KEY,
+    calendar_label  TEXT    NOT NULL,
+    is_system       INTEGER NOT NULL DEFAULT 0,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS market_holiday_calendar_map (
+    holiday_id      INTEGER NOT NULL REFERENCES market_holidays(holiday_id) ON DELETE CASCADE,
+    calendar_code   TEXT    NOT NULL REFERENCES holiday_calendars(calendar_code) ON DELETE CASCADE,
+    PRIMARY KEY (holiday_id, calendar_code)
+);
+
 CREATE TABLE IF NOT EXISTS payment_schedule (
     schedule_id             INTEGER PRIMARY KEY AUTOINCREMENT,
     deal_id                 INTEGER NOT NULL REFERENCES deal_master(deal_id),
@@ -358,9 +595,10 @@ CREATE INDEX IF NOT EXISTS ix_schedule_rdd         ON payment_schedule(rate_dete
 CREATE INDEX IF NOT EXISTS ix_log_cusip            ON calculation_log(cusip);
 CREATE INDEX IF NOT EXISTS ix_log_batch            ON calculation_log(batch_id);
 CREATE INDEX IF NOT EXISTS ix_holidays_date        ON market_holidays(holiday_date);
+CREATE INDEX IF NOT EXISTS ix_holiday_map_calendar ON market_holiday_calendar_map(calendar_code);
 """
 
-SIFMA_SEED_HOLIDAYS = [
+NY_MARKET_SEED_HOLIDAYS = [
     ("2024-01-01","New Year's Day"),("2024-01-15","MLK Day"),
     ("2024-02-19","Presidents Day"),("2024-05-27","Memorial Day"),
     ("2024-06-19","Juneteenth"),("2024-07-04","Independence Day"),
@@ -389,7 +627,7 @@ SIFMA_SEED_HOLIDAYS = [
 ]
 
 
-def _build_seed_holiday_rows():
+def _build_seed_holiday_data():
     from datetime import date
     data = {}  # date -> {name, flags}
     
@@ -398,8 +636,8 @@ def _build_seed_holiday_rows():
             data[dt_str] = {"name": name, "flags": set()}
         data[dt_str]["flags"].add(code)
 
-    for d, name in SIFMA_SEED_HOLIDAYS:
-        for code in ["SIFMA", "US", "NYS", "NYF"]:
+    for d, name in NY_MARKET_SEED_HOLIDAYS:
+        for code in ["NYS", "NYF"]:
             add(code, d, name)
 
     for year in SUPPORTED_HOLIDAY_YEARS:
@@ -407,41 +645,59 @@ def _build_seed_holiday_rows():
             add("LONDON", d, name)
         for d, name in _generate_tokyo_holidays(year):
             add("TOKYO", d, name)
+        for d, name in _generate_australia_holidays(year):
+            add("AUSTRALIA", d, name)
+        for d, name in _generate_canada_holidays(year):
+            add("CANADA", d, name)
+        for d, name in _generate_singapore_holidays(year):
+            add("SINGAPORE", d, name)
+        for d, name in _generate_germany_holidays(year):
+            add("GERMANY", d, name)
             
     records = []
+    memberships = []
     for dt_str, info in data.items():
         d_obj = date.fromisoformat(dt_str)
         f = info["flags"]
         records.append((
             dt_str, d_obj.strftime("%A"), info["name"],
-            1 if "SIFMA" in f else 0, 1 if "US" in f else 0,
+            0, 0,
             1 if "LONDON" in f else 0, 1 if "TOKYO" in f else 0,
             1 if "NYS" in f else 0, 1 if "NYF" in f else 0
         ))
-    return records
+        for code in sorted(f):
+            memberships.append((dt_str, code))
+    return records, memberships
 
-SEED_HOLIDAY_ROWS = _build_seed_holiday_rows()
+SEED_HOLIDAY_ROWS, SEED_HOLIDAY_MEMBERSHIPS = _build_seed_holiday_data()
 
 
 # Pre-computed holiday sets for connection-free date rolling.
-_HOLIDAY_SETS: dict[str, set[date]] = {code: set() for code, _ in HOLIDAY_CALENDAR_OPTIONS}
+_HOLIDAY_SETS: dict[str, set[date]] = {
+    code: set() for code, _ in HOLIDAY_CALENDAR_OPTIONS if code != "ALL"
+}
 # Logic for initial load is handled in init_db re-seeding
 
 def _update_holiday_set(conn) -> None:
     """Reload cached holiday sets from the database."""
     global _HOLIDAY_SETS
-    holiday_sets = {code: set() for code, _ in HOLIDAY_CALENDAR_OPTIONS}
-    rows = conn.execute(
-        "SELECT * FROM market_holidays"
-    ).fetchall()
+    _refresh_holiday_calendar_metadata(conn)
+    holiday_sets = {
+        code: set() for code, _ in HOLIDAY_CALENDAR_OPTIONS if code != "ALL"
+    }
+
+    rows = conn.execute("""
+        SELECT mh.holiday_date, hcm.calendar_code
+        FROM market_holidays mh
+        JOIN market_holiday_calendar_map hcm
+          ON hcm.holiday_id = mh.holiday_id
+        JOIN holiday_calendars hc
+          ON hc.calendar_code = hcm.calendar_code
+         AND hc.is_active = 1
+    """).fetchall()
     for row in rows:
         dt = date.fromisoformat(row["holiday_date"])
-        if row["is_sifma"]:  holiday_sets["SIFMA"].add(dt)
-        if row["is_us"]:     holiday_sets["US"].add(dt)
-        if row["is_london"]: holiday_sets["LONDON"].add(dt)
-        if row["is_tokyo"]:  holiday_sets["TOKYO"].add(dt)
-        if row["is_nys"]:    holiday_sets["NYS"].add(dt)
-        if row["is_nyf"]:    holiday_sets["NYF"].add(dt)
+        holiday_sets.setdefault(row["calendar_code"], set()).add(dt)
     _HOLIDAY_SETS = holiday_sets
 
 
@@ -469,6 +725,33 @@ def _is_business_day_in_set(d: date, holiday_dates: set[date]) -> bool:
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        conn.executemany("""
+            INSERT OR IGNORE INTO holiday_calendars(
+                calendar_code, calendar_label, is_system, is_active, sort_order
+            ) VALUES(?,?,?,?,?)
+        """, [
+            (code, label, 1, 1, idx)
+            for idx, (code, label) in enumerate(BUILTIN_HOLIDAY_CALENDAR_OPTIONS)
+            if code != "ALL"
+        ])
+        conn.executemany("""
+            UPDATE holiday_calendars
+            SET calendar_label=?, is_system=1, is_active=1, sort_order=?
+            WHERE calendar_code=?
+        """, [
+            (label, idx, code)
+            for idx, (code, label) in enumerate(BUILTIN_HOLIDAY_CALENDAR_OPTIONS)
+            if code != "ALL"
+        ])
+        conn.execute("""
+            UPDATE holiday_calendars
+            SET is_active=0
+            WHERE calendar_code IN ('SIFMA', 'US')
+        """)
+        conn.execute("""
+            DELETE FROM market_holiday_calendar_map
+            WHERE calendar_code IN ('SIFMA', 'US')
+        """)
         # Migration: add rate_determination_date if upgrading from older DB
         try:
             conn.execute("ALTER TABLE payment_schedule ADD COLUMN rate_determination_date TEXT")
@@ -792,8 +1075,7 @@ def init_db():
             holiday_cols = [
                 r[1] for r in conn.execute("PRAGMA table_info(market_holidays)").fetchall()
             ]
-            # Migration: if we find the old 'calendar_code' column OR missing 'holiday_day', 
-            # drop the table so it can be recreated in the new wide format.
+            # Migration: if we find the old narrow holiday table, rebuild it into the wide base shape.
             if holiday_cols and ("calendar_code" in holiday_cols or "holiday_day" not in holiday_cols):
                 conn.execute("PRAGMA foreign_keys=OFF")
                 conn.executescript("""
@@ -805,6 +1087,34 @@ def init_db():
         except Exception:
             pass
 
+        try:
+            legacy_rows = conn.execute("""
+                SELECT holiday_id, holiday_date, holiday_name,
+                       is_sifma, is_us, is_london, is_tokyo, is_nys, is_nyf
+                FROM market_holidays
+            """).fetchall()
+            mapping_count = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM market_holiday_calendar_map"
+            ).fetchone()["cnt"]
+            if mapping_count == 0 and legacy_rows:
+                code_to_col = {
+                    "LONDON": "is_london",
+                    "TOKYO": "is_tokyo",
+                    "NYS": "is_nys",
+                    "NYF": "is_nyf",
+                }
+                membership_rows = []
+                for row in legacy_rows:
+                    for code, col in code_to_col.items():
+                        if row[col]:
+                            membership_rows.append((row["holiday_id"], code))
+                conn.executemany("""
+                    INSERT OR IGNORE INTO market_holiday_calendar_map(holiday_id, calendar_code)
+                    VALUES(?,?)
+                """, membership_rows)
+        except Exception:
+            pass
+
         conn.executemany(
             """INSERT OR IGNORE INTO market_holidays(
                 holiday_date, holiday_day, holiday_name, 
@@ -812,38 +1122,123 @@ def init_db():
             ) VALUES(?,?,?,?,?,?,?,?,?)""",
             SEED_HOLIDAY_ROWS
         )
+        seeded_memberships = []
+        seeded_rows = conn.execute("""
+            SELECT holiday_id, holiday_date, is_sifma, is_us, is_london, is_tokyo, is_nys, is_nyf
+            FROM market_holidays
+        """).fetchall()
+        for row in seeded_rows:
+            if row["is_london"]:
+                seeded_memberships.append((row["holiday_id"], "LONDON"))
+            if row["is_tokyo"]:
+                seeded_memberships.append((row["holiday_id"], "TOKYO"))
+            if row["is_nys"]:
+                seeded_memberships.append((row["holiday_id"], "NYS"))
+            if row["is_nyf"]:
+                seeded_memberships.append((row["holiday_id"], "NYF"))
+        for dt_str, code in SEED_HOLIDAY_MEMBERSHIPS:
+            holiday = conn.execute(
+                "SELECT holiday_id FROM market_holidays WHERE holiday_date=?",
+                (dt_str,)
+            ).fetchone()
+            if holiday:
+                seeded_memberships.append((holiday["holiday_id"], code))
+        conn.executemany("""
+            INSERT OR IGNORE INTO market_holiday_calendar_map(holiday_id, calendar_code)
+            VALUES(?,?)
+        """, seeded_memberships)
         _update_holiday_set(conn)
         auto_mature_deals(conn)
 
 def get_holidays(conn, calendar_code=None):
-    q = "SELECT * FROM market_holidays"
-    args = []
-    if calendar_code and calendar_code != "ALL":
-        col = f"is_{calendar_code.lower()}"
-        q += f" WHERE {col} = 1"
-    q += " ORDER BY holiday_date DESC"
-    return [dict(r) for r in conn.execute(q, args).fetchall()]
+    selected_code = str(calendar_code or "ALL").strip().upper()
+    rows = conn.execute("""
+        SELECT mh.holiday_id, mh.holiday_date, mh.holiday_day, mh.holiday_name,
+               hc.calendar_code, hc.calendar_label
+        FROM market_holidays mh
+        LEFT JOIN market_holiday_calendar_map hcm
+          ON hcm.holiday_id = mh.holiday_id
+        LEFT JOIN holiday_calendars hc
+          ON hc.calendar_code = hcm.calendar_code
+         AND hc.is_active = 1
+        ORDER BY mh.holiday_date DESC, hc.sort_order, hc.calendar_label, hc.calendar_code
+    """).fetchall()
 
-def insert_holiday(conn, holiday_date, holiday_name, flags: dict):
+    calendars = list_holiday_calendars(conn, include_all=False)
+    calendar_order = [code for code, _ in calendars]
+    holiday_map: dict[int, dict] = {}
+    for row in rows:
+        holiday_id = row["holiday_id"]
+        if selected_code != "ALL" and row["calendar_code"] != selected_code:
+            continue
+        item = holiday_map.setdefault(holiday_id, {
+            "holiday_id": holiday_id,
+            "holiday_date": row["holiday_date"],
+            "holiday_day": row["holiday_day"],
+            "holiday_name": row["holiday_name"],
+            "calendar_codes": [],
+            "calendar_flags": {},
+        })
+        if row["calendar_code"]:
+            code = row["calendar_code"]
+            item["calendar_codes"].append(code)
+            item["calendar_flags"][code] = 1
+
+    results = []
+    for holiday in holiday_map.values():
+        for code in calendar_order:
+            holiday["calendar_flags"].setdefault(code, 0)
+        holiday["calendar_codes"] = [
+            code for code in calendar_order if holiday["calendar_flags"].get(code)
+        ]
+        results.append(holiday)
+    return results
+
+
+def insert_holiday(conn, holiday_date, holiday_name, calendar_codes: list[str] | set[str]):
     from datetime import date
+    codes = [str(code).strip().upper() for code in calendar_codes if str(code).strip()]
+    if not codes:
+        raise ValueError("Please select at least one holiday calendar.")
+
+    resolved_codes = []
+    for code in codes:
+        resolved_code, _ = ensure_holiday_calendar(conn, code)
+        resolved_codes.append(resolved_code)
+
     day_name = date.fromisoformat(holiday_date).strftime("%A")
     conn.execute("""
-        INSERT OR REPLACE INTO market_holidays(
-            holiday_date, holiday_day, holiday_name,
-            is_sifma, is_us, is_london, is_tokyo, is_nys, is_nyf
-        ) VALUES(?,?,?,?,?,?,?,?,?)
-    """, (
-        holiday_date, day_name, holiday_name,
-        flags.get("SIFMA", 0), flags.get("US", 0),
-        flags.get("LONDON", 0), flags.get("TOKYO", 0),
-        flags.get("NYS", 0), flags.get("NYF", 0)
-    ))
+        INSERT INTO market_holidays(
+            holiday_date, holiday_day, holiday_name
+        ) VALUES(?,?,?)
+        ON CONFLICT(holiday_date) DO UPDATE SET
+            holiday_day=excluded.holiday_day,
+            holiday_name=excluded.holiday_name
+    """, (holiday_date, day_name, holiday_name))
+    holiday_id = conn.execute(
+        "SELECT holiday_id FROM market_holidays WHERE holiday_date=?",
+        (holiday_date,)
+    ).fetchone()["holiday_id"]
+    conn.execute(
+        "DELETE FROM market_holiday_calendar_map WHERE holiday_id=?",
+        (holiday_id,)
+    )
+    conn.executemany("""
+        INSERT OR IGNORE INTO market_holiday_calendar_map(holiday_id, calendar_code)
+        VALUES(?,?)
+    """, [(holiday_id, code) for code in dict.fromkeys(resolved_codes)])
     _update_holiday_set(conn)
+
+
+def add_holiday_calendar(conn, name: str) -> tuple[str, str]:
+    return ensure_holiday_calendar(conn, name, name, allow_existing_label_match=False)
+
 
 def import_holidays_from_excel(conn, path: str) -> tuple[int, list[str]]:
     """
     Import market holidays from Excel.
-    Supports columns: Date, Name, and jurisdiction codes/labels.
+    Supports columns: Date, Name, and one column per holiday calendar.
+    Unknown calendar headers are created automatically.
     """
     import pandas as pd
     from datetime import date
@@ -871,15 +1266,34 @@ def import_holidays_from_excel(conn, path: str) -> tuple[int, list[str]]:
     date_col = _pick_col("date", "holiday date")
     name_col = _pick_col("name", "holiday name", "holiday")
     
-    # Jurisdiction columns mapping (DB column -> list of possible Excel header names)
-    juris_map = {
-        "is_sifma":  ["sifma"],
-        "is_us":     ["us", "us holidays"],
-        "is_london": ["lon", "london"],
-        "is_tokyo":  ["tok", "tokyo"],
-        "is_nys":    ["nys", "new york stock exchange"],
-        "is_nyf":    ["nyf", "new york fed"]
+    known_calendar_headers: dict[str, tuple[str, str]] = {}
+    for code, label in list_holiday_calendars(conn, include_all=False):
+        aliases = {
+            code.strip().upper(),
+            label.strip().upper(),
+            label.replace(" Holidays", "").strip().upper(),
+        }
+        if code == "LONDON":
+            aliases.add("LON")
+        if code == "TOKYO":
+            aliases.add("TOK")
+        for alias in aliases:
+            known_calendar_headers[alias] = (code, label)
+
+    ignored_headers = {
+        "", "DATE", "HOLIDAY DATE", "DAY", "HOLIDAY DAY", "NAME", "HOLIDAY NAME", "HOLIDAY"
     }
+    calendar_columns: list[tuple[str, str]] = []
+    for raw_col in raw_cols:
+        header = str(raw_col).strip()
+        alias = header.upper()
+        if alias in ignored_headers:
+            continue
+        if alias in known_calendar_headers:
+            calendar_columns.append((raw_col, known_calendar_headers[alias][0]))
+            continue
+        code, _ = ensure_holiday_calendar(conn, header, header)
+        calendar_columns.append((raw_col, code))
 
     inserted, errors = 0, []
     for idx, row in df.iterrows():
@@ -893,21 +1307,34 @@ def import_holidays_from_excel(conn, path: str) -> tuple[int, list[str]]:
             
             h_name = str(row.get(name_col, "Uploaded Holiday")).strip() if name_col else "Uploaded Holiday"
             
-            flags = {}
-            for db_col, aliases in juris_map.items():
-                col = _pick_col(*aliases)
-                flags[db_col] = _parse_yn(row[col]) if col else 0
+            codes = [
+                calendar_code
+                for column_name, calendar_code in calendar_columns
+                if _parse_yn(row.get(column_name))
+            ]
+            if not codes:
+                raise ValueError("No holiday calendar was selected for this row")
 
             conn.execute("""
-                INSERT OR REPLACE INTO market_holidays(
-                    holiday_date, holiday_day, holiday_name,
-                    is_sifma, is_us, is_london, is_tokyo, is_nys, is_nyf
-                ) VALUES(?,?,?,?,?,?,?,?,?)
-            """, (
-                dt_str, day_name, h_name,
-                flags["is_sifma"], flags["is_us"], flags["is_london"],
-                flags["is_tokyo"], flags["is_nys"], flags["is_nyf"]
-            ))
+                INSERT INTO market_holidays(
+                    holiday_date, holiday_day, holiday_name
+                ) VALUES(?,?,?)
+                ON CONFLICT(holiday_date) DO UPDATE SET
+                    holiday_day=excluded.holiday_day,
+                    holiday_name=excluded.holiday_name
+            """, (dt_str, day_name, h_name))
+            holiday_id = conn.execute(
+                "SELECT holiday_id FROM market_holidays WHERE holiday_date=?",
+                (dt_str,)
+            ).fetchone()["holiday_id"]
+            conn.execute(
+                "DELETE FROM market_holiday_calendar_map WHERE holiday_id=?",
+                (holiday_id,)
+            )
+            conn.executemany("""
+                INSERT OR IGNORE INTO market_holiday_calendar_map(holiday_id, calendar_code)
+                VALUES(?,?)
+            """, [(holiday_id, code) for code in dict.fromkeys(codes)])
             inserted += 1
         except Exception as e:
             errors.append(f"Row {idx+2}: {e}")
@@ -916,6 +1343,7 @@ def import_holidays_from_excel(conn, path: str) -> tuple[int, list[str]]:
     return inserted, errors
 
 def delete_holiday(conn, holiday_id):
+    conn.execute("DELETE FROM market_holiday_calendar_map WHERE holiday_id = ?", (holiday_id,))
     conn.execute("DELETE FROM market_holidays WHERE holiday_id = ?", (holiday_id,))
     _update_holiday_set(conn)
 

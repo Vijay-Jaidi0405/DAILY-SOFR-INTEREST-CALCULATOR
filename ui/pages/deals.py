@@ -16,7 +16,7 @@ from core.database import (
     DEFAULT_HOLIDAY_CALENDAR,
     deal_period_holiday_calendar,
     deal_rate_holiday_calendar,
-    HOLIDAY_CALENDAR_OPTIONS,
+    list_holiday_calendars,
 )
 from ui.styles import GREEN, RED, ACCENT, BORDER
 
@@ -26,9 +26,6 @@ FREQS      = ["Monthly", "Quarterly"]
 YN         = ["N", "Y"]
 LOOKBACKS  = [0, 1, 2, 5]
 ACCRUAL_BASES = ["Calendar Days", "Observation Period Days"]
-HOLIDAY_SET_OPTIONS = HOLIDAY_CALENDAR_OPTIONS
-
-
 class _DealImportThread(QThread):
     done = Signal(int, list)
     error = Signal(str)
@@ -77,6 +74,7 @@ class DealDialog(QDialog):
         self.setWindowTitle("Add Deal" if deal is None else "Edit Deal")
         self.setMinimumSize(620, 560)
         self._deal = deal
+        self._db = getattr(parent, "_db", None)
         self._build()
         self._apply_dialog_geometry()
         if deal:
@@ -182,16 +180,18 @@ class DealDialog(QDialog):
         self.f_lookback.setValue(2)
         self.f_accrual_basis = combo(ACCRUAL_BASES)
         self.f_rate_holiday_sets = CheckableComboBox()
-        for value, label in HOLIDAY_SET_OPTIONS:
-            self.f_rate_holiday_sets.add_check_item(label, value, checked=(value == "ALL"))
         self.f_rate_holiday_sets.setToolTip(
             "Holiday calendar used to shift observation dates and rate lookups."
         )
         self.f_period_holiday_sets = CheckableComboBox()
-        for value, label in HOLIDAY_SET_OPTIONS:
-            self.f_period_holiday_sets.add_check_item(label, value, checked=(value == "ALL"))
         self.f_period_holiday_sets.setToolTip(
             "Holiday calendar used for period dates, payment dates, and schedule rolling."
+        )
+        self._reload_holiday_calendar_pickers()
+        self._manage_holiday_btn = QPushButton("Manage Holiday Calendars")
+        self._manage_holiday_btn.clicked.connect(self._open_holiday_calendar_manager)
+        self._manage_holiday_btn.setToolTip(
+            "Open Holiday Management to add or update market calendars."
         )
 
         # Payment delay days — only active when Pay Delay = Y
@@ -211,6 +211,7 @@ class DealDialog(QDialog):
         form3.addRow("Accrual Days Basis",  self.f_accrual_basis)
         form3.addRow("Rate Holidays",       self.f_rate_holiday_sets)
         form3.addRow("Period Holidays",     self.f_period_holiday_sets)
+        form3.addRow("",                    self._manage_holiday_btn)
         body_lay.addLayout(form3)
         body_lay.addSpacing(16)
         body_lay.addWidget(_divider())
@@ -629,9 +630,43 @@ class DealDialog(QDialog):
             values = [DEFAULT_HOLIDAY_CALENDAR]
         if "ALL" in values:
             return "ALL"
-        order = [value for value, _ in HOLIDAY_SET_OPTIONS]
+        order = [value for value, _ in self._holiday_calendar_options(include_all=False)]
         selected = [value for value in order if value in values]
         return "|".join(selected)
+
+    def _holiday_calendar_options(self, include_all: bool = True):
+        if self._db:
+            with self._db() as conn:
+                return list_holiday_calendars(conn, include_all=include_all)
+        return list_holiday_calendars(None, include_all=include_all)
+
+    def _reload_holiday_calendar_pickers(self):
+        options = self._holiday_calendar_options(include_all=True)
+        for combo in (self.f_rate_holiday_sets, self.f_period_holiday_sets):
+            combo.model().clear()
+            combo.set_required_values(set())
+            for value, label in options:
+                combo.add_check_item(label, value, checked=(value == "ALL"))
+
+    def _open_holiday_calendar_manager(self):
+        main_window = self.window()
+        self.reject()
+
+        def _switch():
+            try:
+                from ui.pages.holidays import HolidaysPage
+                for idx, page in enumerate(getattr(main_window, "_pages", [])):
+                    if isinstance(page, HolidaysPage):
+                        main_window._switch_page(idx)
+                        if hasattr(page, "_refresh_calendar_controls"):
+                            page._refresh_calendar_controls()
+                        if hasattr(page, "_load_holidays"):
+                            page._load_holidays()
+                        break
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _switch)
 
     def _selected_rate_holiday_calendar(self) -> str:
         return self._selected_calendar_values(self.f_rate_holiday_sets)

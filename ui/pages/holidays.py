@@ -32,6 +32,8 @@ class HolidaysPage(QWidget):
         super().__init__(parent)
         self._db = db_factory
         self._bulk_path = None
+        self._calendar_options = []
+        self._calendar_checkboxes = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -58,6 +60,19 @@ class HolidaysPage(QWidget):
         # Add Holiday Panel
         add_panel = Panel("Add New Holiday")
         add_lay = QVBoxLayout()
+
+        calendar_row = QHBoxLayout()
+        calendar_row.setSpacing(10)
+        self._new_calendar_edit = QLineEdit()
+        self._new_calendar_edit.setPlaceholderText(
+            "New holiday calendar name (e.g. Mumbai)"
+        )
+        add_calendar_btn = QPushButton("Add Calendar")
+        add_calendar_btn.clicked.connect(self._add_calendar)
+        calendar_row.addWidget(QLabel("Holiday Calendar:"))
+        calendar_row.addWidget(self._new_calendar_edit, 1)
+        calendar_row.addWidget(add_calendar_btn)
+        add_lay.addLayout(calendar_row)
         
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
@@ -79,14 +94,7 @@ class HolidaysPage(QWidget):
         # Calendar Flags
         flag_lay = QHBoxLayout()
         flag_lay.addWidget(QLabel("Applicable To:"))
-        from core.database import HOLIDAY_CALENDAR_OPTIONS
-        self._flags = {}
-        for code, label in HOLIDAY_CALENDAR_OPTIONS:
-            if code == "ALL": continue
-            cb = QCheckBox(code)
-            cb.setToolTip(label)
-            self._flags[code] = cb
-            flag_lay.addWidget(cb)
+        self._flag_lay = flag_lay
         
         add_btn = QPushButton("Save Holiday")
         add_btn.setObjectName("PrimaryBtn")
@@ -126,11 +134,6 @@ class HolidaysPage(QWidget):
         filt_row = QHBoxLayout()
         filt_row.addWidget(QLabel("Filter by Calendar:"))
         self._filt_combo = QComboBox()
-        self._filt_combo.addItem("All Calendars", "ALL")
-        from core.database import HOLIDAY_CALENDAR_OPTIONS
-        for code, label in HOLIDAY_CALENDAR_OPTIONS:
-            if code != "ALL":
-                self._filt_combo.addItem(f"{code} - {label}", code)
         self._filt_combo.currentIndexChanged.connect(self._load_holidays)
         
         del_btn = QPushButton("Delete Selected")
@@ -143,13 +146,49 @@ class HolidaysPage(QWidget):
         lay.addLayout(filt_row)
 
         # Table
-        self._tbl = DataTable(["Date", "Day", "Name", "SIFMA", "US", "LON", "TOK", "NYS", "NYF"])
-        # Align flag headers to center to match the checkmark cells
-        for col in range(3, 9):
+        self._tbl = DataTable(["Date", "Day", "Name"])
+        lay.addWidget(self._tbl, 1)
+        self._refresh_calendar_controls()
+
+    def _fetch_calendar_options(self):
+        from core.database import list_holiday_calendars
+        with self._db() as conn:
+            return list_holiday_calendars(conn, include_all=True)
+
+    def _refresh_calendar_controls(self):
+        self._calendar_options = self._fetch_calendar_options()
+        calendar_only = [(code, label) for code, label in self._calendar_options if code != "ALL"]
+
+        current_filter = self._filt_combo.currentData() or "ALL"
+        self._filt_combo.blockSignals(True)
+        self._filt_combo.clear()
+        self._filt_combo.addItem("All Calendars", "ALL")
+        for code, label in calendar_only:
+            self._filt_combo.addItem(f"{code} - {label}", code)
+        idx = self._filt_combo.findData(current_filter)
+        self._filt_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._filt_combo.blockSignals(False)
+
+        while self._flag_lay.count() > 2:
+            item = self._flag_lay.takeAt(1)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self._calendar_checkboxes = {}
+        insert_at = max(1, self._flag_lay.count() - 2)
+        for offset, (code, label) in enumerate(calendar_only):
+            cb = QCheckBox(code)
+            cb.setToolTip(label)
+            self._calendar_checkboxes[code] = cb
+            self._flag_lay.insertWidget(insert_at + offset, cb)
+
+        headers = ["Date", "Day", "Name"] + [code for code, _ in calendar_only]
+        self._tbl.setColumnCount(len(headers))
+        self._tbl.setHorizontalHeaderLabels(headers)
+        for col in range(3, len(headers)):
             h_item = self._tbl.horizontalHeaderItem(col)
             if h_item:
                 h_item.setTextAlignment(Qt.AlignCenter)
-        lay.addWidget(self._tbl, 1)
 
     def _load_holidays(self):
         from core.database import get_holidays
@@ -172,34 +211,53 @@ class HolidaysPage(QWidget):
                 date_item,
                 r["holiday_day"],
                 r["holiday_name"],
-                check(r["is_sifma"]),
-                check(r["is_us"]),
-                check(r["is_london"]),
-                check(r["is_tokyo"]),
-                check(r["is_nys"]),
-                check(r["is_nyf"]),
+            ] + [
+                check(r["calendar_flags"].get(code, 0))
+                for code, _ in self._calendar_options if code != "ALL"
             ])
         self._tbl.populate(table_rows)
 
     def _add_holiday(self):
         dt = self._date_edit.date().toString("yyyy-MM-dd")
         name = self._name_edit.text().strip()
-        flags = {code: (1 if cb.isChecked() else 0) for code, cb in self._flags.items()}
+        selected_codes = [
+            code for code, cb in self._calendar_checkboxes.items() if cb.isChecked()
+        ]
         
         if not name:
             QMessageBox.warning(self, "Input Error", "Please enter a holiday name.")
             return
-        if not any(flags.values()):
+        if not selected_codes:
             QMessageBox.warning(self, "Input Error", "Please select at least one calendar.")
             return
             
         with self._db() as conn:
             from core.database import insert_holiday
-            insert_holiday(conn, dt, name, flags)
+            insert_holiday(conn, dt, name, selected_codes)
             
         self._name_edit.clear()
-        for cb in self._flags.values(): cb.setChecked(False)
+        for cb in self._calendar_checkboxes.values():
+            cb.setChecked(False)
         self._load_holidays()
+
+    def _add_calendar(self):
+        name = self._new_calendar_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Input Error", "Please enter a holiday calendar name.")
+            return
+        try:
+            with self._db() as conn:
+                from core.database import add_holiday_calendar
+                code, label = add_holiday_calendar(conn, name)
+            self._new_calendar_edit.clear()
+            self._refresh_calendar_controls()
+            QMessageBox.information(
+                self,
+                "Calendar Added",
+                f"Holiday calendar {code} - {label} is ready to use."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Calendar Error", str(e))
 
     def _bulk_upload(self):
         self._browse_bulk_file()
@@ -235,6 +293,7 @@ class HolidaysPage(QWidget):
         if errs:
             msg += f"\n{len(errs)} row(s) failed:\n" + "\n".join(errs[:5])
         QMessageBox.information(self, "Import Complete", msg)
+        self._refresh_calendar_controls()
         self._load_holidays()
 
     def _on_bulk_import_error(self, err):
@@ -261,17 +320,16 @@ class HolidaysPage(QWidget):
             import pandas as pd
             export_data = []
             for r in rows:
-                export_data.append({
+                record = {
                     "Date": r["holiday_date"],
                     "Day": r["holiday_day"],
                     "Name": r["holiday_name"],
-                    "SIFMA": "✓" if r["is_sifma"] else "",
-                    "US": "✓" if r["is_us"] else "",
-                    "LON": "✓" if r["is_london"] else "",
-                    "TOK": "✓" if r["is_tokyo"] else "",
-                    "NYS": "✓" if r["is_nys"] else "",
-                    "NYF": "✓" if r["is_nyf"] else "",
-                })
+                }
+                for code, _ in self._calendar_options:
+                    if code == "ALL":
+                        continue
+                    record[code] = "✓" if r["calendar_flags"].get(code) else ""
+                export_data.append(record)
             
             df = pd.DataFrame(export_data)
             df.to_excel(path, index=False)
@@ -295,4 +353,5 @@ class HolidaysPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        QTimer.singleShot(0, self._refresh_calendar_controls)
         QTimer.singleShot(0, self._load_holidays)

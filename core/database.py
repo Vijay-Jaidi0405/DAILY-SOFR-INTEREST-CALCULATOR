@@ -8,11 +8,15 @@ calculation engine for all three methods.
 import sqlite3
 import math
 import re
+import json
 from datetime import date, timedelta
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 DB_PATH = Path(__file__).parent / "sofr_calculator.db"
+NY_FED_API_BASE = "https://markets.newyorkfed.org/api/rates/secured"
 
 DEFAULT_HOLIDAY_CALENDAR = "ALL"
 DEFAULT_RATE_HOLIDAY_CALENDAR = DEFAULT_HOLIDAY_CALENDAR
@@ -2867,6 +2871,114 @@ def auto_mature_deals(conn) -> int:
 # ---------------------------------------------------------------------------
 # SOFR rates
 # ---------------------------------------------------------------------------
+
+def _ny_fed_get_json(path: str, params: dict | None = None) -> dict:
+    clean_params = {k: v for k, v in (params or {}).items() if v is not None}
+    query = f"?{urlencode(clean_params)}" if clean_params else ""
+    url = f"{NY_FED_API_BASE}{path}{query}"
+    req = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "SOFR-Interest-Calculator/1.0",
+        },
+    )
+    with urlopen(req, timeout=20) as resp:
+        payload = resp.read().decode("utf-8")
+    return json.loads(payload)
+
+
+def _ny_fed_rate_day_count_factor(rate_date: date) -> int:
+    # Keep the app's current convention used by manual and Excel imports.
+    return 3 if rate_date.weekday() == 4 else 1
+
+
+def _fetch_ny_fed_series(conn, ratetype: str, table: str,
+                         start_date: date | None = None,
+                         end_date: date | None = None) -> int:
+    if start_date and end_date and start_date > end_date:
+        return 0
+
+    if start_date is None:
+        response = _ny_fed_get_json(f"/{ratetype}/last/1.json")
+    else:
+        response = _ny_fed_get_json(
+            f"/{ratetype}/search.json",
+            params={
+                "startDate": start_date.isoformat(),
+                "endDate": (end_date or date.today()).isoformat(),
+                "type": "rate" if ratetype == "sofr" else None,
+            },
+        )
+
+    rows = response.get("refRates", []) or []
+    inserted = 0
+    for row in rows:
+        eff_date = date.fromisoformat(row["effectiveDate"])
+        if table == "sofr_rates":
+            conn.execute("""
+                INSERT OR REPLACE INTO sofr_rates(rate_date, sofr_rate, day_count_factor)
+                VALUES (?, ?, ?)
+            """, (
+                eff_date.isoformat(),
+                float(row["percentRate"]),
+                _ny_fed_rate_day_count_factor(eff_date),
+            ))
+        else:
+            conn.execute("""
+                INSERT OR REPLACE INTO sofr_index(rate_date, sofr_index)
+                VALUES (?, ?)
+            """, (
+                eff_date.isoformat(),
+                float(row["index"]),
+            ))
+        inserted += 1
+    return inserted
+
+
+def fetch_ny_fed_sofr_updates(conn, today: date | None = None) -> dict:
+    """
+    Fetch incremental SOFR overnight rates and SOFR index values from the
+    New York Fed Markets Data API.
+    """
+    as_of = today or date.today()
+    latest_rate = conn.execute(
+        "SELECT MAX(rate_date) AS mx FROM sofr_rates"
+    ).fetchone()["mx"]
+    latest_index = conn.execute(
+        "SELECT MAX(rate_date) AS mx FROM sofr_index"
+    ).fetchone()["mx"]
+
+    rate_start = (
+        date.fromisoformat(latest_rate) + timedelta(days=1)
+        if latest_rate else None
+    )
+    index_start = (
+        date.fromisoformat(latest_index) + timedelta(days=1)
+        if latest_index else None
+    )
+
+    rates_inserted = _fetch_ny_fed_series(
+        conn, "sofr", "sofr_rates", start_date=rate_start, end_date=as_of
+    )
+    index_inserted = _fetch_ny_fed_series(
+        conn, "sofrai", "sofr_index", start_date=index_start, end_date=as_of
+    )
+
+    latest_rate_after = conn.execute(
+        "SELECT MAX(rate_date) AS mx FROM sofr_rates"
+    ).fetchone()["mx"]
+    latest_index_after = conn.execute(
+        "SELECT MAX(rate_date) AS mx FROM sofr_index"
+    ).fetchone()["mx"]
+
+    return {
+        "rates_inserted": rates_inserted,
+        "index_inserted": index_inserted,
+        "latest_rate_date": latest_rate_after,
+        "latest_index_date": latest_index_after,
+    }
+
 
 def import_rates_from_excel(conn, path: str) -> tuple[int, list[str]]:
     """

@@ -39,6 +39,24 @@ class _ImportThread(QThread):
             self.error.emit(str(e))
 
 
+class _NyFedFetchThread(QThread):
+    done = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, db_factory):
+        super().__init__()
+        self._db = db_factory
+
+    def run(self):
+        try:
+            from core.database import fetch_ny_fed_sofr_updates
+            with self._db() as conn:
+                result = fetch_ny_fed_sofr_updates(conn)
+            self.done.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 # ---------------------------------------------------------------------------
 # Manual entry dialog — shared for both rate and index
 # ---------------------------------------------------------------------------
@@ -170,6 +188,26 @@ class RatesPage(QWidget):
             "Manage SOFR overnight rates and SOFR compounded index in separate tables — "
             "upload NY Fed Excel files directly or enter / edit individual values"
         ))
+
+        fetch_row = QHBoxLayout()
+        fetch_row.setSpacing(10)
+        self._nyfed_fetch_btn = QPushButton("Fetch Latest from NY Fed API")
+        self._nyfed_fetch_btn.setObjectName("PrimaryBtn")
+        self._nyfed_fetch_btn.clicked.connect(self._fetch_from_ny_fed)
+        self._nyfed_fetch_prog = QProgressBar()
+        self._nyfed_fetch_prog.setVisible(False)
+        self._nyfed_fetch_prog.setRange(0, 0)
+        fetch_hint = QLabel(
+            "Pulls SOFR overnight rates and SOFR index from the official New York Fed API "
+            "from the latest stored date through the latest date available today."
+        )
+        fetch_hint.setWordWrap(True)
+        fetch_hint.setStyleSheet("color:#6B7280; font-size:11px;")
+        fetch_row.addWidget(self._nyfed_fetch_btn)
+        fetch_row.addWidget(self._nyfed_fetch_prog)
+        fetch_row.addStretch()
+        lay.addLayout(fetch_row)
+        lay.addWidget(fetch_hint)
 
         # ── Two panels side by side: import + manual entry ────────────────────
         panels_row = QHBoxLayout()
@@ -556,6 +594,36 @@ class RatesPage(QWidget):
         prog.setVisible(False)
         ibtn.setEnabled(True)
         QMessageBox.critical(self, "Import Error", err)
+
+    def _fetch_from_ny_fed(self):
+        self._nyfed_fetch_btn.setEnabled(False)
+        self._nyfed_fetch_prog.setVisible(True)
+        t = _NyFedFetchThread(self._db)
+        t.done.connect(self._on_nyfed_fetch_done)
+        t.error.connect(self._on_nyfed_fetch_error)
+        self._nyfed_thread = t
+        t.start()
+
+    def _on_nyfed_fetch_done(self, result: dict):
+        self._nyfed_fetch_prog.setVisible(False)
+        self._nyfed_fetch_btn.setEnabled(True)
+        self._load_summary()
+        self._load_tables()
+        QMessageBox.information(
+            self,
+            "NY Fed Fetch Complete",
+            (
+                f"SOFR rates added: {result.get('rates_inserted', 0)}\n"
+                f"SOFR index rows added: {result.get('index_inserted', 0)}\n"
+                f"Latest SOFR rate date: {fmt_date(result.get('latest_rate_date'))}\n"
+                f"Latest SOFR index date: {fmt_date(result.get('latest_index_date'))}"
+            )
+        )
+
+    def _on_nyfed_fetch_error(self, err: str):
+        self._nyfed_fetch_prog.setVisible(False)
+        self._nyfed_fetch_btn.setEnabled(True)
+        QMessageBox.critical(self, "NY Fed Fetch Error", err)
 
     # ── Summary & table loading ───────────────────────────────────────────────
 

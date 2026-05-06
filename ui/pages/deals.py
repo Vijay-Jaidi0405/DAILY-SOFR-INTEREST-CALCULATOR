@@ -420,7 +420,9 @@ class DealDialog(QDialog):
         try:
             from core.database import (
                 _nearest_next_bday, _nearest_prev_bday,
-                _add_months, _shift_business_days_back, holiday_calendar_label
+                _add_months, _shift_business_days_back,
+                _shift_business_days_forward, _adjust_payment_bday,
+                holiday_calendar_label
             )
             from datetime import date, timedelta
 
@@ -445,13 +447,18 @@ class DealDialog(QDialog):
                 # For payment-delay deals, onboarding captures the first period-end boundary.
                 p_start = _nearest_next_bday(issue, holiday_calendar=period_holiday_calendar)
                 p_end = _nearest_next_bday(boundary, holiday_calendar=period_holiday_calendar)
-                pay_date = _nearest_next_bday(
-                    p_end + timedelta(days=delay_d),
+                raw_pay = _shift_business_days_forward(
+                    p_end,
+                    delay_d,
+                    holiday_calendar=period_holiday_calendar
+                )
+                pay_date = _adjust_payment_bday(
+                    raw_pay,
                     holiday_calendar=period_holiday_calendar
                 )
             else:
                 # Standard deals use first payment date as the first period boundary.
-                pay_date = _nearest_next_bday(boundary, holiday_calendar=period_holiday_calendar)
+                pay_date = _adjust_payment_bday(boundary, holiday_calendar=period_holiday_calendar)
                 p_end = _nearest_prev_bday(
                     pay_date - timedelta(days=1),
                     holiday_calendar=period_holiday_calendar

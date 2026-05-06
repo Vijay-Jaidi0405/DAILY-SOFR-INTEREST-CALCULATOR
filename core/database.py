@@ -1932,8 +1932,8 @@ def _calculate_interest_for_deal(conn, deal: dict, cusip: str,
         actual_delay,
         holiday_calendar=deal_period_holiday_calendar(deal)
     )
-    adj_pay = _next_business_day(
-        conn, raw_pay,
+    adj_pay = _adjust_payment_bday(
+        raw_pay,
         holiday_calendar=deal_period_holiday_calendar(deal)
     )
     rounded_rate = round(all_in_annual_rate, 7)
@@ -2068,6 +2068,20 @@ def _nearest_next_bday(d: date,
     return d
 
 
+def _adjust_payment_bday(d: date,
+                         holiday_calendar=DEFAULT_HOLIDAY_CALENDAR) -> date:
+    """
+    Roll a payment date to a business day using modified following convention.
+
+    If the next business day would fall in a later month, use the preceding
+    business day instead.
+    """
+    next_bday = _nearest_next_bday(d, holiday_calendar=holiday_calendar)
+    if next_bday.month == d.month and next_bday.year == d.year:
+        return next_bday
+    return _nearest_prev_bday(d, holiday_calendar=holiday_calendar)
+
+
 def _gen_periods(anchor_date: date, maturity: date, freq: str,
                  delay_days: int = 0,
                  holiday_calendar=DEFAULT_HOLIDAY_CALENDAR,
@@ -2088,9 +2102,9 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
         payment_date[N] = next_bday(period_end[N], then + delay_days business days)
         period_start[1] = initial_period_start
 
-    All intermediate payment dates and period dates are business days.
-    The final period end and final payment date are always the onboarded
-    maturity date for every deal.
+    Payment dates use modified following business-day convention: roll forward
+    unless that crosses month-end, then roll backward. The final period end is
+    the onboarded maturity date for every deal.
     """
     months        = 1 if freq == "Monthly" else 3
     final_maturity = maturity
@@ -2122,14 +2136,10 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
         else:
             # Standard deals: boundary is the un-delayed marker
             boundary_date = _add_months(anchor_date, months * (num - 1))
-            delayed_pay = _shift_business_days_forward(
+            pay_date = _adjust_payment_bday(
                 boundary_date,
-                delay_days,
                 holiday_calendar=holiday_calendar
             )
-            pay_date = _nearest_next_bday(delayed_pay, holiday_calendar=holiday_calendar)
-            if pay_date >= final_maturity:
-                pay_date = final_maturity
             # Period end is equal to the payment date for standard deals
             p_end = pay_date
 
@@ -2139,11 +2149,17 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
                 delay_days,
                 holiday_calendar=holiday_calendar
             )
-            pay_date = _nearest_next_bday(delayed_pay, holiday_calendar=holiday_calendar)
+            pay_date = _adjust_payment_bday(
+                delayed_pay,
+                holiday_calendar=holiday_calendar
+            )
 
         if p_end >= final_maturity:
             p_end = final_maturity
-            pay_date = final_maturity
+            pay_date = _adjust_payment_bday(
+                final_maturity,
+                holiday_calendar=holiday_calendar
+            )
 
         # Guard: ensure end is strictly after start
         if p_end <= p_start:
@@ -2157,13 +2173,16 @@ def _gen_periods(anchor_date: date, maturity: date, freq: str,
                     delay_days,
                     holiday_calendar=holiday_calendar
                 )
-                pay_date = _nearest_next_bday(
+                pay_date = _adjust_payment_bday(
                     delayed_pay,
                     holiday_calendar=holiday_calendar
                 )
             if p_end >= final_maturity:
                 p_end = final_maturity
-                pay_date = final_maturity
+                pay_date = _adjust_payment_bday(
+                    final_maturity,
+                    holiday_calendar=holiday_calendar
+                )
 
         periods.append((num, p_start, p_end, pay_date))
         if p_end >= final_maturity:
